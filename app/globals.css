@@ -1,0 +1,155 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import 'shadcn/tailwind.css';
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --color-warning: var(--warning);
+  --color-success: var(--success);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+}
+
+:root {
+  color-scheme: dark;
+  --background: #0a0a0c;
+  --foreground: #e6f6fb;
+  --card: rgb(18 22 28 / 0.72);
+  --card-foreground: #e6f6fb;
+  --popover: #101318;
+  --popover-foreground: #e6f6fb;
+  --primary: #22d3ee;
+  --primary-foreground: #031317;
+  --secondary: #141a21;
+  --secondary-foreground: #d6eef5;
+  --muted: #12171d;
+  --muted-foreground: #8aa1ab;
+  --accent: #0e2a31;
+  --accent-foreground: #a5f3fc;
+  --destructive: #f43f5e;
+  --warning: #fbbf24;
+  --success: #34d399;
+  --border: rgb(148 233 255 / 0.12);
+  --input: rgb(148 233 255 / 0.16);
+  --ring: #22d3ee;
+  --radius: 0.875rem;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    -webkit-tap-highlight-color: transparent;
+    overflow-x: hidden;
+  }
+  body {
+    @apply bg-background text-foreground font-sans;
+    overflow-x: hidden;
+    overscroll-behavior-y: none;
+  }
+}
+
+@utility glass {
+  background: rgb(16 20 26 / 0.62);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border: 1px solid rgb(148 233 255 / 0.12);
+}
+
+@utility hud-grid {
+  background-image:
+    linear-gradient(rgb(34 211 238 / 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(34 211 238 / 0.05) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+@utility pb-safe {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+@utility pt-safe {
+  padding-top: env(safe-area-inset-top);
+}
+
+@keyframes hud-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes hud-spin-reverse {
+  to {
+    transform: rotate(-360deg);
+  }
+}
+
+@keyframes core-pulse {
+  0%,
+  100% {
+    opacity: 0.75;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.06);
+  }
+}
+
+.hud-spin-slow {
+  animation: hud-spin 28s linear infinite;
+}
+.hud-spin-mid {
+  animation: hud-spin-reverse 18s linear infinite;
+}
+.hud-spin-fast {
+  animation: hud-spin 9s linear infinite;
+}
+.core-pulse {
+  animation: core-pulse 3.2s ease-in-out infinite;
+}
+.is-active .hud-spin-fast {
+  animation-duration: 3s;
+}
+.is-active .hud-spin-mid {
+  animation-duration: 7s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud-spin-slow,
+  .hud-spin-mid,
+  .hud-spin-fast,
+  .core-pulse {
+    animation: none;
+  }
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+  }
+}
