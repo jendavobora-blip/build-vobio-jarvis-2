@@ -7,7 +7,6 @@ import type { MemoryItem } from "@/lib/jarvis/types"
 type Sql = ReturnType<typeof neon>
 
 let sqlClient: Sql | undefined
-let schemaReady: Promise<void> | undefined
 
 function getSql(): Sql | undefined {
   const url = serverConfig.databaseUrl
@@ -20,35 +19,8 @@ export function isDatabaseConfigured(): boolean {
   return Boolean(serverConfig.databaseUrl)
 }
 
-async function ensureSchema(sql: Sql) {
-  schemaReady ??= (async () => {
-    await sql`CREATE TABLE IF NOT EXISTS jarvis_memories (
-      id TEXT PRIMARY KEY,
-      category TEXT NOT NULL,
-      title TEXT NOT NULL,
-      content TEXT NOT NULL,
-      sensitive BOOLEAN NOT NULL DEFAULT FALSE,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    )`
-    await sql`CREATE TABLE IF NOT EXISTS jarvis_usage (
-      day DATE PRIMARY KEY,
-      cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
-      tokens BIGINT NOT NULL DEFAULT 0,
-      requests INTEGER NOT NULL DEFAULT 0
-    )`
-  })().catch((error) => {
-    schemaReady = undefined
-    throw error
-  })
-  await schemaReady
-}
-
 async function db(): Promise<Sql | undefined> {
-  const sql = getSql()
-  if (!sql) return undefined
-  await ensureSchema(sql)
-  return sql
+  return getSql()
 }
 
 interface MemoryRow {

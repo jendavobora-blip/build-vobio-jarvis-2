@@ -5,7 +5,7 @@ import type { ModelId, Usage } from "@/lib/jarvis/types"
 
 const ENDPOINT = "https://api.deepseek.com/chat/completions"
 const TIMEOUT_MS = 90_000
-const MAX_ATTEMPTS = 2
+export const MAX_ATTEMPTS = 3
 
 export class DeepSeekError extends Error {
   constructor(

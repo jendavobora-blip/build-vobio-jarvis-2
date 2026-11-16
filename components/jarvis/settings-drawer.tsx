@@ -149,7 +149,7 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
         </Section>
 
         <p className="pb-4 text-center font-mono text-[10px] uppercase tracking-[0.25em] text-muted-foreground/60">
-          VOBIO JARVIS 2.0 · Jan Vobora
+          VOBIO JARVIS 3.0 · Jan Vobora
         </p>
       </div>
     </SlideOver>

@@ -1,6 +1,6 @@
 import "server-only"
 import { z } from "zod"
-import { callJson, DeepSeekError } from "./deepseek"
+import { callJson, DeepSeekError, MAX_ATTEMPTS } from "./deepseek"
 import { plannerSystem, specialistSystem, synthesisSystem } from "./prompts"
 import { AGENTS, QUICK_MAX_SPECIALISTS, SPECIALISTS } from "@/lib/jarvis/agents"
 import { addUsage, emptyUsage, worstCaseCost } from "@/lib/jarvis/pricing"
@@ -91,11 +91,18 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
   let total = emptyUsage()
   const start = now()
   const runId = crypto.randomUUID()
+  let reservedTokens = 0
+  let reservedCostUsd = 0
 
   const withinBudget = (promptText: string, maxOut: number) => {
     const promptTokens = estimateTokens(promptText)
-    const projectedTokens = total.promptTokens + total.completionTokens + promptTokens + maxOut
-    const projectedCost = total.costUsd + worstCaseCost(body.model, promptTokens, maxOut)
+    const retryBound = MAX_ATTEMPTS
+    const projectedTokens =
+      total.promptTokens + total.completionTokens + reservedTokens + (promptTokens + maxOut) * retryBound
+    const projectedCost =
+      total.costUsd +
+      reservedCostUsd +
+      worstCaseCost(body.model, promptTokens * retryBound, maxOut * retryBound)
     return projectedTokens <= limits.maxTokens && projectedCost <= limits.maxCostUsd
   }
 
@@ -214,6 +221,7 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
       prior.length ? `\n\nVýstupy ostatních agentů:\n${formatOutputs(Object.fromEntries(prior.map((id) => [id, outputs[id]])))}` : ""
     }`
     const maxOut = maxTokensFor(body, "specialist")
+    const promptTokens = estimateTokens(system + user)
 
     if (!withinBudget(system + user, maxOut)) {
       budgetStopped = true
@@ -221,6 +229,11 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
       emit({ type: "agent_status", agent, status: "skipped", task, activity: "Přeskočeno kvůli rozpočtu", at: now() })
       return
     }
+
+    const reservationTokens = (promptTokens + maxOut) * MAX_ATTEMPTS
+    const reservationCostUsd = worstCaseCost(body.model, promptTokens * MAX_ATTEMPTS, maxOut * MAX_ATTEMPTS)
+    reservedTokens += reservationTokens
+    reservedCostUsd += reservationCostUsd
 
     for (const from of prior) emit({ type: "link", from, to: agent, at: now() })
     emit({
@@ -256,6 +269,9 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
       emit({ type: "agent_error", agent, message, attempts: (error as { attempts?: number }).attempts ?? 1, at: now() })
       emit({ type: "agent_status", agent, status: "error", task, activity: message, at: now() })
       if (error instanceof DeepSeekError && error.fatal) throw error
+    } finally {
+      reservedTokens = Math.max(0, reservedTokens - reservationTokens)
+      reservedCostUsd = Math.max(0, reservedCostUsd - reservationCostUsd)
     }
   }
 
