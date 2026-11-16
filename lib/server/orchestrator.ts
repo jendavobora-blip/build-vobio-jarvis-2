@@ -167,7 +167,7 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
       const usage = (error as { usage?: Usage }).usage
       if (usage) track(usage)
       if (error instanceof DeepSeekError && error.fatal) {
-        emit({ type: "agent_error", agent: "orchestrator", message: error.message, attempts: 2, at: now() })
+        emit({ type: "agent_error", agent: "orchestrator", message: error.message, attempts: (error as { attempts?: number }).attempts ?? 1, at: now() })
         throw error
       }
       rationale = "Plánování modelem selhalo – použit záložní výběr podle pracovního režimu."
@@ -253,7 +253,7 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
       const usage = (error as { usage?: Usage }).usage
       if (usage && usage.promptTokens) track(usage)
       const message = error instanceof DeepSeekError ? error.message : "Agent selhal."
-      emit({ type: "agent_error", agent, message, attempts: 2, at: now() })
+      emit({ type: "agent_error", agent, message, attempts: (error as { attempts?: number }).attempts ?? 1, at: now() })
       emit({ type: "agent_status", agent, status: "error", task, activity: message, at: now() })
       if (error instanceof DeepSeekError && error.fatal) throw error
     }
@@ -303,7 +303,7 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
         const usage = (error as { usage?: Usage }).usage
         if (usage && usage.promptTokens) track(usage)
         const message = error instanceof DeepSeekError ? error.message : "Syntéza selhala."
-        emit({ type: "agent_error", agent: "orchestrator", message, attempts: 2, at: now() })
+        emit({ type: "agent_error", agent: "orchestrator", message, attempts: (error as { attempts?: number }).attempts ?? 1, at: now() })
         emit({ type: "agent_status", agent: "orchestrator", status: "error", task: "Syntéza výsledků", activity: message, at: now() })
       }
     } else {

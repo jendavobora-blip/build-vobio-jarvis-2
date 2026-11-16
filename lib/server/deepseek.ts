@@ -115,8 +115,10 @@ export async function callJson<T>(
 ): Promise<JsonCallResult<T>> {
   let totalUsage: Usage = { promptTokens: 0, completionTokens: 0, cacheHitTokens: 0, costUsd: 0 }
   let lastError: DeepSeekError | undefined
+  let attemptsMade = 0
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    attemptsMade = attempt
     try {
       const { content, usage } = await callOnce(opts)
       totalUsage = {
@@ -139,6 +141,6 @@ export async function callJson<T>(
     }
   }
   const error = lastError ?? new DeepSeekError("Volání modelu selhalo.", false)
-  ;(error as DeepSeekError & { usage?: Usage }).usage = totalUsage
+  Object.assign(error, { usage: totalUsage, attempts: attemptsMade })
   throw error
 }

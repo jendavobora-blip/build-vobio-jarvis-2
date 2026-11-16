@@ -35,7 +35,7 @@ function cursorTarget(id: AgentId, rt: AgentRuntime): { x: number; y: number } {
     case "idle":
       return HOME[id]
     case "queued":
-      return { x: s.x + 1, y: s.y + 1 }
+      return { x: s.x + 2, y: s.y + CARD_H - 7 }
     case "thinking":
       return { x: s.x + CARD_W - 6, y: s.y + CARD_H - 5 }
     case "done":
@@ -61,11 +61,11 @@ export function AgentCanvas({ run, onInspect }: AgentCanvasProps) {
   const isDemo = run.source === "demo"
 
   return (
-    <div className="relative">
+    <div className="relative space-y-2">
       {isDemo && (
-        <div className="absolute left-1/2 top-2 z-30 -translate-x-1/2 rounded-full border border-warning/50 bg-warning/15 px-3 py-1 font-mono text-[10px] font-semibold uppercase tracking-widest text-warning">
-          DEMO REŽIM – simulace
-        </div>
+        <p className="mx-auto w-fit rounded-full border border-warning/50 bg-warning/15 px-3 py-1 font-mono text-[10px] font-semibold uppercase tracking-widest text-warning">
+          DEMO REŽIM – simulace, žádná skutečná práce
+        </p>
       )}
       <div
         className="hud-grid glass relative h-[640px] w-full overflow-hidden rounded-3xl"
@@ -223,7 +223,7 @@ function AgentCursor({ id, rt, reduce }: { id: AgentId; rt: AgentRuntime; reduce
   const agent = AGENTS[id]
   const target = cursorTarget(id, rt)
   const flipLabel = target.x > 62
-  const compact = rt.status === "idle" || rt.status === "skipped"
+  const compact = rt.status === "idle" || rt.status === "skipped" || rt.status === "done"
 
   return (
     <motion.div
@@ -237,6 +237,7 @@ function AgentCursor({ id, rt, reduce }: { id: AgentId; rt: AgentRuntime; reduce
         <path d="M1 1 L15 8 L8.5 9.5 L5.5 16.5 Z" fill={agent.color} stroke="#0a0a0c" strokeWidth="1" />
       </svg>
       <div
+        hidden={rt.status === "done"}
         className={cn(
           "absolute top-4 max-w-[150px] rounded-md px-1.5 py-0.5 text-[10px] font-medium leading-tight text-[#0a0a0c] shadow-lg",
           flipLabel ? "right-2" : "left-3",
