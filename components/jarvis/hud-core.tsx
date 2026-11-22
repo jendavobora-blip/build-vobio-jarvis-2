@@ -1,5 +1,7 @@
 "use client"
 
+import { useState } from "react"
+import { SpatialVisualization } from "./spatial-visualization"
 import { cn } from "@/lib/utils"
 
 interface HudCoreProps {
@@ -10,13 +12,14 @@ interface HudCoreProps {
 }
 
 export function HudCore({ active, label, sublabel, className }: HudCoreProps) {
+  const [rendering3d, setRendering3d] = useState(false)
   return (
     <div className={cn("hud-core-3d relative mx-auto aspect-square w-full max-w-[280px]", active && "is-active", className)}>
       <div
         aria-hidden="true"
         className="core-pulse absolute inset-[18%] rounded-full bg-[radial-gradient(circle,rgba(34,211,238,0.35)_0%,rgba(34,211,238,0.08)_45%,transparent_70%)] blur-xl"
       />
-      <svg viewBox="0 0 200 200" className="absolute inset-0 size-full" aria-hidden="true">
+      <svg viewBox="0 0 200 200" className={cn("absolute inset-0 size-full", rendering3d && "invisible")} aria-hidden="true">
         <defs>
           <radialGradient id="core-fill" cx="50%" cy="50%" r="50%">
             <stop offset="0%" stopColor="#cffafe" />
@@ -68,6 +71,7 @@ export function HudCore({ active, label, sublabel, className }: HudCoreProps) {
         <circle cx="100" cy="100" r="40" fill="none" stroke="#22d3ee" strokeOpacity="0.35" strokeWidth="0.8" />
         <circle className="core-pulse" style={{ transformOrigin: "100px 100px" }} cx="100" cy="100" r="26" fill="url(#core-fill)" />
       </svg>
+      <SpatialVisualization kind="core" onDisplayChange={setRendering3d} />
       <div className="absolute inset-x-0 bottom-[6%] flex flex-col items-center text-center" aria-live="polite">
         <span className="font-mono text-[11px] uppercase tracking-[0.3em] text-primary">{label}</span>
         <span className="mt-1 max-w-[85%] truncate text-xs text-muted-foreground">{sublabel}</span>

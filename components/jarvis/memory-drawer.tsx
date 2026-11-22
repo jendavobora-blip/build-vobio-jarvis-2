@@ -4,6 +4,7 @@ import { Cloud, Download, HardDrive, Lock, Pencil, Plus, Trash2, Upload } from "
 import { useRef, useState } from "react"
 import { SlideOver } from "./slide-over"
 import { CATEGORY_LABELS, type StoredMemory, type useMemories } from "@/hooks/use-memories"
+import { filterMemories } from "@/lib/jarvis/memory-filter"
 import type { MemoryCategory } from "@/lib/jarvis/types"
 import { cn } from "@/lib/utils"
 
@@ -30,12 +31,13 @@ const CATEGORIES = Object.keys(CATEGORY_LABELS) as MemoryCategory[]
 
 export function MemoryDrawer({ open, onClose, memory, cloudAvailable, cloudReason }: MemoryDrawerProps) {
   const [filter, setFilter] = useState<MemoryCategory | "all">("all")
+  const [query, setQuery] = useState("")
   const [draft, setDraft] = useState<Draft | null>(null)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
-  const visible = memory.items.filter((m) => filter === "all" || m.category === filter)
+  const visible = filterMemories(memory.items, filter, query)
 
   const startNew = () =>
     setDraft({
@@ -243,6 +245,11 @@ export function MemoryDrawer({ open, onClose, memory, cloudAvailable, cloudReaso
           </form>
         )}
 
+        <label className="block">
+          <span className="text-sm text-muted-foreground">Hledat v paměti</span>
+          <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Název nebo obsah…" className="mt-1 min-h-11 w-full rounded-xl border border-input bg-background px-3 text-base" />
+        </label>
+
         <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1" role="tablist" aria-label="Filtr kategorií">
           {(["all", ...CATEGORIES] as const).map((c) => (
             <button
@@ -263,7 +270,7 @@ export function MemoryDrawer({ open, onClose, memory, cloudAvailable, cloudReaso
 
         {visible.length === 0 ? (
           <p className="rounded-2xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
-            Zatím žádné položky. Přidejte preference, projekty nebo úkoly – JARVIS je použije jako kontext.
+            {memory.items.length === 0 ? "Zatím žádné položky. Přidejte preference, projekty nebo úkoly – JARVIS je použije jako kontext." : "Žádné položky neodpovídají filtru."}
           </p>
         ) : (
           <ul className="space-y-2">

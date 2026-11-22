@@ -4,7 +4,7 @@
 
 V této větvi je připraven interaktivní, česky lokalizovaný prototyp devíti obrazovek: Velín, Agenti, Orchestrace, Projekty, Automatizace, Hlas, Paměť, Analytika a Nastavení. Navigace je vodorovně posuvná na mobilu; katalog obsahuje 20 lokálních ukázkových projektů. Stávající agentní plátno, hlasové ovládání, paměť a nastavení zůstávají zachované.
 
-HUD používá stávající CSS/SVG a transformace místo WebGL. Animace respektují `prefers-reduced-motion`; výkon 60 FPS je cílová optimalizace, nikoli naměřená garance na všech modelech iPhonu.
+HUD nyní používá Three.js/WebGL pro prostorové jádro a síť původních sedmi agentů. Spojnice odrážejí události aktuálního běhu; simulace zůstává označena DEMO. 2D karty agentů zůstávají přístupné, jádro má SVG fallback. Při omezení pohybu, nedostupném WebGL nebo dlouhodobě nízkém výkonu se používá 2D režim. FPS se zobrazuje jako průběžný průměr, ale 60 FPS nebylo na iPhonu změřeno ani zaručeno.
 
 ## Bezpečnost a aktivace
 

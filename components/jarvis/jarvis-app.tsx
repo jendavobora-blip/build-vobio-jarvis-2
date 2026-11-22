@@ -10,6 +10,7 @@ import { HudCore } from "./hud-core"
 import { MemoryDrawer } from "./memory-drawer"
 import { ResultPanel } from "./result-panel"
 import { SettingsDrawer } from "./settings-drawer"
+import { SpatialVisualization } from "./spatial-visualization"
 import {
   AnalyticsScreen,
   AutomationsScreen,
@@ -193,6 +194,7 @@ export function JarvisApp() {
             {view === "agents" && (
               <section className="space-y-4">
                 <ScreenHeading eyebrow="Tým agentů" title="Sedm specializovaných rolí" detail="Klepnutím na kartu zobrazíte roli a stav. Ukázková práce je vždy označena DEMO." />
+                <SpatialVisualization kind="agents" run={run} onInspect={setInspect} />
                 <AgentCanvas run={run} onInspect={setInspect} />
                 <ResultPanel run={run} speaking={voice.speaking} canSpeak={voice.synthesisSupported} onSpeak={voice.speak} onStopSpeaking={voice.stopSpeaking} />
               </section>
