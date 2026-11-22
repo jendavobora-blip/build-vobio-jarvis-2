@@ -3,27 +3,23 @@ import { z } from "zod"
 import { authenticatedUser } from "@/lib/server/auth"
 import { createAccountInvite, isDatabaseConfigured } from "@/lib/server/db"
 import { clientIp, rateLimit } from "@/lib/server/rate-limit"
+import { hasValidRequestOrigin } from "@/lib/server/request-security"
 
 export const runtime = "nodejs"
 
 const schema = z.object({ email: z.string().email().max(254) })
 
-function sameOrigin(request: Request): boolean {
-  const origin = request.headers.get("origin")
-  if (!origin) return false
-  try {
-    return new URL(origin).origin === new URL(request.url).origin
-  } catch {
-    return false
-  }
-}
-
 export async function POST(request: Request) {
-  if (!sameOrigin(request)) return Response.json({ error: "Neplatný původ požadavku." }, { status: 403 })
+  if (!hasValidRequestOrigin(request)) return Response.json({ error: "Neplatný původ požadavku." }, { status: 403 })
   const user = await authenticatedUser()
   if (!user || user.role !== "owner") return Response.json({ error: "Pozvánky může vytvářet pouze vlastník." }, { status: 403 })
   if (!isDatabaseConfigured()) return Response.json({ error: "Pozvánky vyžadují DATABASE_URL." }, { status: 501 })
-  const limit = rateLimit(`invite:${user.id}:${clientIp(request.headers)}`, 5, 60 * 60_000)
+  let limit
+  try {
+    limit = await rateLimit(`invite:${user.id}:${clientIp(request.headers)}`, 5, 60 * 60_000)
+  } catch {
+    return Response.json({ error: "Sdílená ochrana pozvánek není dostupná." }, { status: 503 })
+  }
   if (!limit.ok) {
     return Response.json({ error: "Limit pozvánek byl vyčerpán." }, { status: 429, headers: { "Retry-After": String(limit.retryAfterSec) } })
   }

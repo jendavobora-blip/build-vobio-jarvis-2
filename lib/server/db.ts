@@ -11,7 +11,20 @@ const OWNER_MIGRATION = "2026-11-stable-owner-v1"
 let sqlClient: Sql | undefined
 let schemaReady: Promise<void> | undefined
 
+export function installDatabaseAdapterForTesting(client: Sql): void {
+  if (process.env.NODE_ENV === "production") throw new Error("Test database adapters are disabled in production.")
+  sqlClient = client
+  schemaReady = undefined
+}
+
+export function clearDatabaseAdapterForTesting(): void {
+  if (process.env.NODE_ENV === "production") throw new Error("Test database adapters are disabled in production.")
+  sqlClient = undefined
+  schemaReady = undefined
+}
+
 function getSql(): Sql | undefined {
+  if (sqlClient) return sqlClient
   const url = serverConfig.databaseUrl
   if (!url) return undefined
   sqlClient ??= neon(url)
@@ -51,7 +64,7 @@ async function ensureSchema(sql: Sql) {
         WHERE NOT EXISTS (SELECT 1 FROM jarvis_schema_migrations WHERE version = ${OWNER_MIGRATION})`,
       tx`DO $migration$
         BEGIN
-          IF NOT EXISTS (SELECT 1 FROM jarvis_schema_migrations WHERE version = '${OWNER_MIGRATION}') THEN
+          IF NOT EXISTS (SELECT 1 FROM jarvis_schema_migrations WHERE version = '2026-11-stable-owner-v1') THEN
             ALTER TABLE jarvis_memories DROP CONSTRAINT IF EXISTS jarvis_memories_pkey;
             ALTER TABLE jarvis_memories ADD PRIMARY KEY (id, owner_id);
           END IF;
@@ -63,7 +76,24 @@ async function ensureSchema(sql: Sql) {
       day DATE PRIMARY KEY,
       cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
       tokens BIGINT NOT NULL DEFAULT 0,
-      requests INTEGER NOT NULL DEFAULT 0
+      requests INTEGER NOT NULL DEFAULT 0,
+      reserved_usd DOUBLE PRECISION NOT NULL DEFAULT 0
+    )`
+    await sql`ALTER TABLE jarvis_usage ADD COLUMN IF NOT EXISTS reserved_usd DOUBLE PRECISION NOT NULL DEFAULT 0`
+    await sql`CREATE TABLE IF NOT EXISTS jarvis_budget_reservations (
+      id UUID PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      day DATE NOT NULL,
+      reserved_usd DOUBLE PRECISION NOT NULL CHECK (reserved_usd > 0),
+      status TEXT NOT NULL CHECK (status IN ('reserved', 'settled')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      settled_at TIMESTAMPTZ
+    )`
+    await sql`CREATE TABLE IF NOT EXISTS jarvis_rate_limits (
+      key TEXT NOT NULL,
+      window_start TIMESTAMPTZ NOT NULL,
+      count INTEGER NOT NULL CHECK (count > 0),
+      PRIMARY KEY (key, window_start)
     )`
     await sql`CREATE TABLE IF NOT EXISTS jarvis_approvals (
       id TEXT PRIMARY KEY,
@@ -104,9 +134,11 @@ async function ensureSchema(sql: Sql) {
       email TEXT NOT NULL,
       password_hash TEXT NOT NULL,
       active BOOLEAN NOT NULL DEFAULT TRUE,
+      session_version INTEGER NOT NULL DEFAULT 0,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       UNIQUE (owner_id, email)
     )`
+    await sql`ALTER TABLE jarvis_accounts ADD COLUMN IF NOT EXISTS session_version INTEGER NOT NULL DEFAULT 0`
     await sql`CREATE TABLE IF NOT EXISTS jarvis_account_invites (
       id UUID PRIMARY KEY,
       owner_id UUID NOT NULL,
@@ -159,6 +191,20 @@ export async function listMemories(ownerId: string): Promise<MemoryItem[]> {
   return rows.map(toItem)
 }
 
+export async function restoreOwnerMemoriesFromBackup(ownerId: string): Promise<number> {
+  const sql = await db()
+  if (!sql) throw new Error("Databáze není nastavena.")
+  const rows = (await sql`WITH restored AS (
+    INSERT INTO jarvis_memories (id, owner_id, category, title, content, sensitive, created_at, updated_at)
+    SELECT backup.id, ${ownerId}, backup.category, backup.title, backup.content, backup.sensitive, backup.created_at, backup.updated_at
+    FROM jarvis_memories_owner_backup backup
+    ON CONFLICT (id, owner_id) DO NOTHING
+    RETURNING id
+  )
+  SELECT count(*)::integer AS count FROM restored`) as { count: number }[]
+  return Number(rows[0]?.count ?? 0)
+}
+
 export async function upsertMemory(ownerId: string, item: MemoryItem): Promise<void> {
   const sql = await db()
   if (!sql) throw new Error("Databáze není nastavena.")
@@ -184,41 +230,112 @@ function today(): string {
 }
 
 export async function getDailyUsage(): Promise<{ costUsd: number; tokens: number; requests: number; shared: boolean }> {
-  try {
-    const sql = await db()
-    if (sql) {
-      const rows = (await sql`SELECT cost_usd, tokens, requests FROM jarvis_usage WHERE day = ${today()}`) as {
-        cost_usd: number
-        tokens: string | number
-        requests: number
-      }[]
-      const row = rows[0]
-      return {
-        costUsd: Number(row?.cost_usd ?? 0),
-        tokens: Number(row?.tokens ?? 0),
-        requests: Number(row?.requests ?? 0),
-        shared: true,
-      }
-    }
-  } catch (error) {
-    console.error("[jarvis] usage ledger read failed", error instanceof Error ? error.message : error)
+  const sql = await db()
+  if (!sql) {
+    const local = memoryLedger.get(today()) ?? { costUsd: 0, tokens: 0, requests: 0 }
+    return { ...local, shared: false }
   }
-  const local = memoryLedger.get(today()) ?? { costUsd: 0, tokens: 0, requests: 0 }
-  return { ...local, shared: false }
+  const rows = (await sql`SELECT cost_usd, tokens, requests FROM jarvis_usage WHERE day = ${today()}`) as {
+    cost_usd: number
+    tokens: string | number
+    requests: number
+  }[]
+  const row = rows[0]
+  return {
+    costUsd: Number(row?.cost_usd ?? 0),
+    tokens: Number(row?.tokens ?? 0),
+    requests: Number(row?.requests ?? 0),
+    shared: true,
+  }
 }
 
-export async function recordUsage(costUsd: number, tokens: number): Promise<void> {
+export async function reserveDailyBudget(
+  ownerId: string,
+  reservationId: string,
+  amountUsd: number,
+  dailyBudgetUsd: number,
+): Promise<boolean> {
+  if (!Number.isFinite(amountUsd) || amountUsd <= 0 || !Number.isFinite(dailyBudgetUsd) || dailyBudgetUsd <= 0) {
+    throw new Error("Neplatná rezervace rozpočtu.")
+  }
+  const sql = await db()
+  if (!sql) throw new Error("Živý rozpočet vyžaduje sdílenou databázi.")
   const key = today()
-  const local = memoryLedger.get(key) ?? { costUsd: 0, tokens: 0, requests: 0 }
-  memoryLedger.set(key, { costUsd: local.costUsd + costUsd, tokens: local.tokens + tokens, requests: local.requests + 1 })
-  try {
-    const sql = await db()
-    if (!sql) return
-    await sql`INSERT INTO jarvis_usage (day, cost_usd, tokens, requests) VALUES (${key}, ${costUsd}, ${tokens}, 1)
-      ON CONFLICT (day) DO UPDATE SET cost_usd = jarvis_usage.cost_usd + EXCLUDED.cost_usd,
-        tokens = jarvis_usage.tokens + EXCLUDED.tokens, requests = jarvis_usage.requests + 1`
-  } catch (error) {
-    console.error("[jarvis] usage ledger write failed", error instanceof Error ? error.message : error)
+  await sql`WITH expired AS (
+    UPDATE jarvis_budget_reservations
+    SET status = 'settled', settled_at = now()
+    WHERE day = ${key} AND status = 'reserved' AND created_at < now() - interval '1 hour'
+    RETURNING day, reserved_usd
+  ), released AS (
+    SELECT day, sum(reserved_usd) AS amount FROM expired GROUP BY day
+  )
+  UPDATE jarvis_usage usage
+  SET reserved_usd = GREATEST(0, usage.reserved_usd - released.amount)
+  FROM released
+  WHERE usage.day = released.day`
+  const rows = (await sql`WITH budget AS (
+    INSERT INTO jarvis_usage (day, cost_usd, tokens, requests, reserved_usd)
+    VALUES (${key}, 0, 0, 0, ${amountUsd})
+    ON CONFLICT (day) DO UPDATE
+      SET reserved_usd = jarvis_usage.reserved_usd + EXCLUDED.reserved_usd
+      WHERE jarvis_usage.cost_usd + jarvis_usage.reserved_usd + EXCLUDED.reserved_usd <= ${dailyBudgetUsd}
+    RETURNING day
+  ), reservation AS (
+    INSERT INTO jarvis_budget_reservations (id, owner_id, day, reserved_usd, status)
+    SELECT ${reservationId}::uuid, ${ownerId}, day, ${amountUsd}, 'reserved' FROM budget
+    RETURNING id
+  )
+  SELECT id FROM reservation`) as { id: string }[]
+  return rows.length === 1
+}
+
+export async function settleDailyBudget(reservationId: string, costUsd: number, tokens: number): Promise<void> {
+  if (!Number.isFinite(costUsd) || costUsd < 0 || !Number.isFinite(tokens) || tokens < 0) {
+    throw new Error("Neplatné vyúčtování rozpočtu.")
+  }
+  const sql = await db()
+  if (!sql) throw new Error("Vyúčtování vyžaduje sdílenou databázi.")
+  await sql.transaction((tx) => [
+    tx`WITH settled AS (
+      UPDATE jarvis_budget_reservations
+      SET status = 'settled', settled_at = now()
+      WHERE id = ${reservationId}::uuid AND status = 'reserved'
+      RETURNING day, reserved_usd
+    )
+    UPDATE jarvis_usage usage
+    SET reserved_usd = GREATEST(0, usage.reserved_usd - settled.reserved_usd),
+        cost_usd = usage.cost_usd + ${costUsd},
+        tokens = usage.tokens + ${Math.trunc(tokens)},
+        requests = usage.requests + 1
+    FROM settled
+    WHERE usage.day = settled.day`,
+  ])
+}
+
+export async function consumeSharedRateLimit(
+  key: string,
+  limit: number,
+  windowMs: number,
+): Promise<{ ok: boolean; retryAfterSec: number }> {
+  if (!Number.isInteger(limit) || limit < 1 || !Number.isFinite(windowMs) || windowMs < 1) {
+    throw new Error("Neplatná konfigurace rate limitu.")
+  }
+  const sql = await db()
+  if (!sql) throw new Error("Distribuovaný rate limit vyžaduje sdílenou databázi.")
+  const nowMs = Date.now()
+  const startMs = Math.floor(nowMs / windowMs) * windowMs
+  const windowStart = new Date(startMs).toISOString()
+  const rows = (await sql`INSERT INTO jarvis_rate_limits (key, window_start, count)
+    VALUES (${key}, ${windowStart}, 1)
+    ON CONFLICT (key, window_start) DO UPDATE SET count = jarvis_rate_limits.count + 1
+    RETURNING count`) as { count: number }[]
+  if (Math.random() < 0.01) {
+    await sql`DELETE FROM jarvis_rate_limits WHERE window_start < now() - interval '48 hours'`
+  }
+  const count = Number(rows[0]?.count ?? limit + 1)
+  return {
+    ok: count <= limit,
+    retryAfterSec: count <= limit ? 0 : Math.max(1, Math.ceil((startMs + windowMs - nowMs) / 1000)),
   }
 }
 
@@ -373,24 +490,26 @@ export async function findAccountForLogin(ownerId: string, email: string): Promi
   id: string
   password_hash: string
   active: boolean
+  session_version: number
 } | undefined> {
   const sql = await db()
   if (!sql) throw new Error("Databáze není nastavena.")
-  const rows = (await sql`SELECT id, password_hash, active FROM jarvis_accounts
+  const rows = (await sql`SELECT id, password_hash, active, session_version FROM jarvis_accounts
     WHERE owner_id = ${ownerId} AND email = ${email} LIMIT 1`) as {
     id: string
     password_hash: string
     active: boolean
+    session_version: number
   }[]
   return rows[0]
 }
 
-export async function isActiveAccount(ownerId: string, userId: string): Promise<boolean> {
+export async function isActiveAccount(ownerId: string, userId: string, sessionVersion: number): Promise<boolean> {
   if (ownerId === userId) return true
   const sql = await db()
   if (!sql) return false
   const rows = (await sql`SELECT id FROM jarvis_accounts
-    WHERE owner_id = ${ownerId} AND id = ${userId} AND active = TRUE LIMIT 1`) as { id: string }[]
+    WHERE owner_id = ${ownerId} AND id = ${userId} AND active = TRUE AND session_version = ${sessionVersion} LIMIT 1`) as { id: string }[]
   return rows.length > 0
 }
 
@@ -409,7 +528,9 @@ export async function listAccounts(ownerId: string): Promise<{ id: string; email
 export async function setAccountActive(ownerId: string, userId: string, active: boolean): Promise<boolean> {
   const sql = await db()
   if (!sql) throw new Error("Databáze není nastavena.")
-  const rows = (await sql`UPDATE jarvis_accounts SET active = ${active}
+  const rows = (await sql`UPDATE jarvis_accounts
+    SET session_version = session_version + CASE WHEN active IS DISTINCT FROM ${active} THEN 1 ELSE 0 END,
+        active = ${active}
     WHERE owner_id = ${ownerId} AND id = ${userId} RETURNING id`) as { id: string }[]
   return rows.length === 1
 }

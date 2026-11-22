@@ -1,12 +1,14 @@
 import { z } from "zod"
-import { isAuthenticated } from "@/lib/server/auth"
+import { randomUUID } from "node:crypto"
+import { authenticatedUser } from "@/lib/server/auth"
 import { isLiveAvailable, serverConfig } from "@/lib/server/config"
 import { clientIp, rateLimit } from "@/lib/server/rate-limit"
-import { getDailyUsage, recordUsage } from "@/lib/server/db"
+import { reserveDailyBudget, settleDailyBudget } from "@/lib/server/db"
 import { runOrchestration } from "@/lib/server/orchestrator"
 import { DeepSeekError } from "@/lib/server/deepseek"
 import { SPECIALISTS } from "@/lib/jarvis/agents"
 import type { ChatRequestBody, RunEvent } from "@/lib/jarvis/types"
+import { hasValidRequestOrigin } from "@/lib/server/request-security"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -40,15 +42,22 @@ function jsonError(message: string, status: number, extra?: Record<string, unkno
 }
 
 export async function POST(request: Request) {
+  if (!hasValidRequestOrigin(request)) return jsonError("Neplatný původ požadavku.", 403)
   if (!isLiveAvailable()) {
     return jsonError("Živý režim není nakonfigurován. Aplikace běží v DEMO REŽIMU.", 503, { demo: true })
   }
-  if (!(await isAuthenticated())) {
+  const user = await authenticatedUser()
+  if (!user) {
     return jsonError("Pro živý režim se přihlaste přístupovým kódem.", 401)
   }
 
   const ip = clientIp(request.headers)
-  const limit = rateLimit(`chat:${ip}`, serverConfig.limits.runsPerWindow, 10 * 60_000)
+  let limit
+  try {
+    limit = await rateLimit(`chat:${user.id}:${ip}`, serverConfig.limits.runsPerWindow, 10 * 60_000)
+  } catch {
+    return jsonError("Sdílená ochrana požadavků není dostupná.", 503)
+  }
   if (!limit.ok) {
     return jsonError(`Příliš mnoho požadavků. Zkuste to znovu za ${limit.retryAfterSec} s.`, 429, undefined, {
       "Retry-After": String(limit.retryAfterSec),
@@ -64,15 +73,22 @@ export async function POST(request: Request) {
     return jsonError("Neplatný JSON v požadavku.", 400)
   }
 
-  const daily = await getDailyUsage()
-  const dailyRemaining = serverConfig.limits.dailyBudgetUsd - daily.costUsd
-  if (dailyRemaining <= 0) {
-    return jsonError("Denní rozpočet API je vyčerpán. Limit se obnoví o půlnoci UTC.", 429)
+  const reservationId = randomUUID()
+  const reservedUsd = Math.min(
+    parsed.budget.maxCostUsd,
+    serverConfig.limits.maxRequestUsd,
+    serverConfig.limits.dailyBudgetUsd,
+  )
+  let reserved: boolean
+  try {
+    reserved = await reserveDailyBudget(user.ownerId, reservationId, reservedUsd, serverConfig.limits.dailyBudgetUsd)
+  } catch {
+    return jsonError("Sdílenou rezervaci rozpočtu nelze ověřit.", 503)
   }
-
+  if (!reserved) return jsonError("Denní rozpočet API je vyčerpán. Limit se obnoví o půlnoci UTC.", 429)
   const limits = {
     maxTokens: Math.min(parsed.budget.maxTokens, serverConfig.limits.maxRequestTokens),
-    maxCostUsd: Math.min(parsed.budget.maxCostUsd, serverConfig.limits.maxRequestUsd, dailyRemaining),
+    maxCostUsd: reservedUsd,
   }
 
   const encoder = new TextEncoder()
@@ -105,6 +121,13 @@ export async function POST(request: Request) {
         const total = await runOrchestration({ body: parsed, emit, signal: abort.signal, limits })
         spent = { costUsd: total.costUsd, tokens: total.promptTokens + total.completionTokens }
       } catch (error) {
+        const usage = (error as { usage?: { costUsd?: number; promptTokens?: number; completionTokens?: number } }).usage
+        if (usage) {
+          spent = {
+            costUsd: Math.max(0, usage.costUsd ?? 0),
+            tokens: Math.max(0, (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0)),
+          }
+        }
         const message =
           error instanceof DeepSeekError ? error.message : "Při zpracování došlo k neočekávané chybě. Zkuste to znovu."
         if (!(error instanceof DeepSeekError)) {
@@ -114,7 +137,11 @@ export async function POST(request: Request) {
         emit({ type: "done", durationMs: 0, at: Date.now() })
       } finally {
         clearInterval(heartbeat)
-        await recordUsage(spent.costUsd, spent.tokens)
+        try {
+          await settleDailyBudget(reservationId, spent.costUsd, spent.tokens)
+        } catch (error) {
+          console.error("[jarvis] budget settlement failed", error instanceof Error ? error.message : "unknown error")
+        }
         if (!closed) {
           closed = true
           controller.close()

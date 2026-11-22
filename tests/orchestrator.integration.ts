@@ -75,42 +75,6 @@ test("Router delegates to legacy-compatible specialists and Final Judge returns 
     signal: new AbortController().signal,
     limits: { maxTokens: 500_000, maxCostUsd: 5 },
   })
-
-  test("invited account passwords are salted and verified without storing plaintext", async () => {
-    const password = "test-only-password-4-accounts"
-    const encoded = await hashAccountPassword(password)
-    const independentlySalted = await hashAccountPassword(password)
-    assert.notEqual(encoded, password)
-    assert.notEqual(encoded, independentlySalted)
-    assert.match(encoded, /^scrypt-v1:/)
-    assert.equal(await verifyAccountPassword(password, encoded), true)
-    assert.equal(await verifyAccountPassword("different-password", encoded), false)
-  })
-
-  test("owner identity and data encryption are independent of session and provider key rotation", () => {
-    process.env.JARVIS_OWNER_ID = "3a3b4c5d-6e7f-4a8b-9c0d-1e2f3a4b5c6d"
-    process.env.JARVIS_SESSION_SECRET = "a".repeat(40)
-    process.env.JARVIS_ENCRYPTION_KEY = "b".repeat(40)
-    process.env.JARVIS_ACCESS_CODE = "old-access-code"
-    process.env.DEEPSEEK_API_KEY = "old-provider-key"
-
-    const stableId = ownerId()
-    const session = createSessionToken()
-    assert.ok(session)
-    const encrypted = encryptText("recoverable sensitive data")
-
-    process.env.JARVIS_ACCESS_CODE = "new-access-code"
-    process.env.DEEPSEEK_API_KEY = "new-provider-key"
-    assert.equal(ownerId(), stableId)
-    assert.equal(isValidSessionToken(session.token), true)
-    assert.equal(decryptText(encrypted), "recoverable sensitive data")
-
-    process.env.JARVIS_SESSION_SECRET = "c".repeat(40)
-    assert.equal(ownerId(), stableId)
-    assert.equal(isValidSessionToken(session.token), false)
-    assert.equal(decryptText(encrypted), "recoverable sensitive data")
-  })
-
   assert.ok(calls.some((system) => system.includes("Role: ROUTER")))
   assert.ok(calls.some((system) => system.includes("Role: RESEARCHER")))
   assert.ok(calls.some((system) => system.includes("Role: ARCHITECT")))
@@ -125,4 +89,39 @@ test("Router delegates to legacy-compatible specialists and Final Judge returns 
     needsApproval: [],
   })
   assert.equal(result.promptTokens, calls.length * 100)
+})
+
+test("invited account passwords are salted and verified without storing plaintext", async () => {
+  const password = "test-only-password-4-accounts"
+  const encoded = await hashAccountPassword(password)
+  const independentlySalted = await hashAccountPassword(password)
+  assert.notEqual(encoded, password)
+  assert.notEqual(encoded, independentlySalted)
+  assert.match(encoded, /^scrypt-v1:/)
+  assert.equal(await verifyAccountPassword(password, encoded), true)
+  assert.equal(await verifyAccountPassword("different-password", encoded), false)
+})
+
+test("owner identity and data encryption are independent of session and provider key rotation", () => {
+  process.env.JARVIS_OWNER_ID = "3a3b4c5d-6e7f-4a8b-9c0d-1e2f3a4b5c6d"
+  process.env.JARVIS_SESSION_SECRET = "a".repeat(40)
+  process.env.JARVIS_ENCRYPTION_KEY = "b".repeat(40)
+  process.env.JARVIS_ACCESS_CODE = "old-access-code"
+  process.env.DEEPSEEK_API_KEY = "old-provider-key"
+
+  const stableId = ownerId()
+  const session = createSessionToken()
+  assert.ok(session)
+  const encrypted = encryptText("recoverable sensitive data")
+
+  process.env.JARVIS_ACCESS_CODE = "new-access-code"
+  process.env.DEEPSEEK_API_KEY = "new-provider-key"
+  assert.equal(ownerId(), stableId)
+  assert.equal(isValidSessionToken(session.token), true)
+  assert.equal(decryptText(encrypted), "recoverable sensitive data")
+
+  process.env.JARVIS_SESSION_SECRET = "c".repeat(40)
+  assert.equal(ownerId(), stableId)
+  assert.equal(isValidSessionToken(session.token), false)
+  assert.equal(decryptText(encrypted), "recoverable sensitive data")
 })

@@ -21,6 +21,22 @@ Před migrací zachovejte databázovou zálohu. Pokud starší citlivá data byl
 
 ## Účty a schválení
 
-Vlastník se stále přihlašuje přístupovým kódem; může vytvořit jednorázovou 24hodinovou pozvánku, která se předá ručně, a deaktivovat pozvané účty. Členové používají unikátní e-mail a scrypt-hashované heslo; relace se ověřuje proti aktivnímu účtu. Každý účet má oddělené paměťové a schvalovací záznamy. Pozvánky se e-mailem neposílají. Omezení pokusů o přihlášení je zatím pouze po instanci, ne distribuované.
+Vlastník se stále přihlašuje přístupovým kódem; může vytvořit jednorázovou 24hodinovou pozvánku, která se předá ručně, a deaktivovat pozvané účty. Členové používají unikátní e-mail a scrypt-hashované heslo; relace se ověřuje proti aktivnímu účtu. Každý účet má oddělené paměťové a schvalovací záznamy. Pozvánky se e-mailem neposílají.
+
+V produkci se přihlášení, pozvánky, paměť, schválení a živé chat požadavky omezují přes PostgreSQL sdílený pevný interval; chyba sdíleného limiteru blokuje požadavek. IP klíč bere pouze důvěryhodný `x-real-ip` a v databázi ukládá jeho hash. Lokální limiter se používá pouze mimo produkci bez databáze. Stavové browser API vyžaduje přesný `Origin` shodný s cílovým originem a odmítá `Sec-Fetch-Site: cross-site`.
+
+Denní výdaje se rezervují atomicky v PostgreSQL před voláním modelu. Po skončení běhu se rezervace převede na skutečné účtování; chyba databáze při rezervaci živé volání zablokuje. Neuzavřené rezervace starší než hodina se před dalším během uvolní po havárii instance. Živý režim vyžaduje nakonfigurovanou databázi.
 
 Schvalování ukládá plán, audit a stav; ani schválený plán nyní nespustí externí akci. Budoucí nástroj musí před akcí atomicky spotřebovat odpovídající schválení podle uživatele a přesného hashe plánu. Kritické plány vyžadují dvě oddělená potvrzení.
+
+## Izolované databázové testy
+
+`pnpm test:db` záměrně maže schéma `public`; spusťte jej výhradně proti vyhrazené zahoditelné databázi `jarvis_test` na loopbacku. Test ověřuje migraci staré paměti, opakované spuštění migrace z nové instance, obnovu ze snapshotu, izolaci účtů, pozvánky, distribuovaný limiter a souběžné rezervace rozpočtu. Nezadávejte produkční `DATABASE_URL`.
+
+```sh
+docker run --rm --name vobio-jarvis-pg-test \
+  -e POSTGRES_HOST_AUTH_METHOD=trust -e POSTGRES_DB=jarvis_test \
+  -p 127.0.0.1:55432:5432 -d postgres:16-alpine
+JARVIS_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/jarvis_test pnpm test:db
+docker stop vobio-jarvis-pg-test
+```

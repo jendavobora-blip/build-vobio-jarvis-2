@@ -52,6 +52,7 @@ export function verifyAccessCode(input: string): boolean {
 export function createSessionToken(
   userId = ownerId(),
   role: AuthenticatedUser["role"] = "owner",
+  sessionVersion = 0,
 ): { token: string; maxAge: number } | undefined {
   const key = signingKey()
   const tenantOwnerId = ownerId()
@@ -62,6 +63,7 @@ export function createSessionToken(
       sub: userId,
       owner: tenantOwnerId,
       role,
+      ver: sessionVersion,
       n: randomBytes(8).toString("hex"),
     }),
   ).toString("base64url")
@@ -78,7 +80,7 @@ async function sessionUser(): Promise<AuthenticatedUser | undefined> {
   if (!isValidSessionToken(token)) return undefined
   const payload = token?.split(".")[0]
   if (!payload) return undefined
-  let data: { sub?: string; owner?: string; role?: AuthenticatedUser["role"] }
+  let data: { sub?: string; owner?: string; role?: AuthenticatedUser["role"]; ver?: number }
   try {
     data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"))
   } catch {
@@ -91,7 +93,8 @@ async function sessionUser(): Promise<AuthenticatedUser | undefined> {
   }
   if (data.role !== "member") return undefined
   const { isActiveAccount } = await import("./db")
-  if (!(await isActiveAccount(tenantOwnerId, data.sub))) return undefined
+  const sessionVersion = data.ver ?? 0
+  if (!Number.isInteger(sessionVersion) || sessionVersion < 0 || !(await isActiveAccount(tenantOwnerId, data.sub, sessionVersion))) return undefined
   return { id: data.sub, ownerId: tenantOwnerId, role: "member" }
 }
 
@@ -139,14 +142,17 @@ export async function verifyAccountPassword(password: string, encoded: string): 
   }
 }
 
-export async function authenticateAccount(email: string, password: string): Promise<string | undefined> {
+export async function authenticateAccount(
+  email: string,
+  password: string,
+): Promise<{ id: string; sessionVersion: number } | undefined> {
   const tenantOwnerId = ownerId()
   if (!tenantOwnerId) return undefined
   const { findAccountForLogin } = await import("./db")
   const account = await findAccountForLogin(tenantOwnerId, email)
   const dummyHash = `scrypt-v1:${Buffer.alloc(16).toString("base64url")}:${Buffer.alloc(64).toString("base64url")}`
   const validPassword = await verifyAccountPassword(password, account?.password_hash ?? dummyHash)
-  return account?.active && validPassword ? account.id : undefined
+  return account?.active && validPassword ? { id: account.id, sessionVersion: account.session_version } : undefined
 }
 
 export function encryptText(plain: string): string {

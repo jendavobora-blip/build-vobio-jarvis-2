@@ -5,7 +5,7 @@ test("preview rejects live AI calls even when the flag and credentials are confi
   expect(status.ok()).toBeTruthy()
   expect((await status.json()).liveEnabled).toBe(false)
   expect((await status.json()).authConfigured).toBe(false)
-  const chat = await request.post("/api/chat", { data: {} })
+  const chat = await request.post("/api/chat", { headers: { Origin: "http://localhost:31848" }, data: {} })
   expect(chat.status()).toBe(503)
   expect((await chat.json()).demo).toBe(true)
 })
@@ -120,4 +120,13 @@ test("unauthenticated visitors cannot manage accounts or create invitations", as
     data: { email: "member@example.test" },
   })
   expect(invitation.status()).toBe(403)
+})
+
+test("state-changing APIs reject cross-origin requests", async ({ page }) => {
+  await page.goto("/")
+  const csrfHeaders = { Origin: "https://attacker.example", "Sec-Fetch-Site": "cross-site" }
+  const login = await page.request.post("/api/auth", { headers: csrfHeaders, data: { code: "incorrect-test-code" } })
+  expect(login.status()).toBe(403)
+  const memory = await page.request.put("/api/memory", { headers: csrfHeaders, data: {} })
+  expect(memory.status()).toBe(403)
 })

@@ -4,6 +4,7 @@ import { z } from "zod"
 import { createSessionToken, hashAccountPassword, ownerId, SESSION_COOKIE } from "@/lib/server/auth"
 import { isDatabaseConfigured, redeemAccountInvite } from "@/lib/server/db"
 import { clientIp, rateLimit } from "@/lib/server/rate-limit"
+import { hasValidRequestOrigin } from "@/lib/server/request-security"
 
 export const runtime = "nodejs"
 
@@ -13,21 +14,16 @@ const schema = z.object({
   password: z.string().min(12).max(128),
 })
 
-function sameOrigin(request: Request): boolean {
-  const origin = request.headers.get("origin")
-  if (!origin) return false
-  try {
-    return new URL(origin).origin === new URL(request.url).origin
-  } catch {
-    return false
-  }
-}
-
 export async function POST(request: Request) {
-  if (!sameOrigin(request)) return Response.json({ error: "Neplatný původ požadavku." }, { status: 403 })
+  if (!hasValidRequestOrigin(request)) return Response.json({ error: "Neplatný původ požadavku." }, { status: 403 })
   const tenantOwnerId = ownerId()
   if (!isDatabaseConfigured() || !tenantOwnerId) return Response.json({ error: "Registrace vyžaduje nakonfigurovanou databázi." }, { status: 503 })
-  const limit = rateLimit(`redeem:${clientIp(request.headers)}`, 10, 15 * 60_000)
+  let limit
+  try {
+    limit = await rateLimit(`redeem:${clientIp(request.headers)}`, 10, 15 * 60_000)
+  } catch {
+    return Response.json({ error: "Sdílená ochrana registrace není dostupná." }, { status: 503 })
+  }
   if (!limit.ok) return Response.json({ error: "Příliš mnoho pokusů. Zkuste to později." }, { status: 429 })
   const parsed = schema.safeParse(await request.json().catch(() => null))
   if (!parsed.success) return Response.json({ error: "Pozvánka, e-mail nebo heslo nejsou platné." }, { status: 400 })

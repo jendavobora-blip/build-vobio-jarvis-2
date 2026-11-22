@@ -2,6 +2,7 @@ import { z } from "zod"
 import { authenticatedOwnerId } from "@/lib/server/auth"
 import { isDatabaseConfigured, createApproval, listApprovalAudit, listApprovals, resolveApproval } from "@/lib/server/db"
 import { approvalHash, approvalId, approvalPlanSchema } from "@/lib/server/approvals"
+import { hasValidRequestOrigin, rateLimitResponse } from "@/lib/server/request-security"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -12,28 +13,20 @@ const resolveSchema = z.object({
   decision: z.enum(["approve", "confirm_critical", "deny"]),
 })
 
-function sameOrigin(request: Request): boolean {
-  const origin = request.headers.get("origin")
-  if (!origin) return false
-  try {
-    return new URL(origin).origin === new URL(request.url).origin
-  } catch {
-    return false
-  }
-}
-
 async function owner(request: Request): Promise<string | Response> {
-  if (!sameOrigin(request)) return Response.json({ error: "Neplatný původ požadavku." }, { status: 403 })
+  if (!hasValidRequestOrigin(request)) return Response.json({ error: "Neplatný původ požadavku." }, { status: 403 })
   const ownerId = await authenticatedOwnerId()
   if (!ownerId) return Response.json({ error: "Nejste přihlášeni." }, { status: 401 })
   if (!isDatabaseConfigured()) return Response.json({ error: "Schvalování vyžaduje DATABASE_URL." }, { status: 501 })
   return ownerId
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   const ownerId = await authenticatedOwnerId()
   if (!ownerId) return Response.json({ error: "Nejste přihlášeni." }, { status: 401 })
   if (!isDatabaseConfigured()) return Response.json({ error: "Schvalování vyžaduje DATABASE_URL." }, { status: 501 })
+  const limited = await rateLimitResponse(request, `approvals-read:${ownerId}`, 60, 60_000)
+  if (limited) return limited
   try {
     const [items, audit] = await Promise.all([listApprovals(ownerId), listApprovalAudit(ownerId)])
     return Response.json({ items, audit }, { headers: { "Cache-Control": "no-store" } })
@@ -45,6 +38,8 @@ export async function GET() {
 export async function POST(request: Request) {
   const authorized = await owner(request)
   if (authorized instanceof Response) return authorized
+  const limited = await rateLimitResponse(request, `approvals-write:${authorized}`, 20, 60_000)
+  if (limited) return limited
   const parsed = approvalPlanSchema.safeParse(await request.json().catch(() => null))
   if (!parsed.success) return Response.json({ error: "Neplatný schvalovací plán." }, { status: 400 })
   const id = approvalId()
@@ -60,6 +55,8 @@ export async function POST(request: Request) {
 export async function PUT(request: Request) {
   const authorized = await owner(request)
   if (authorized instanceof Response) return authorized
+  const limited = await rateLimitResponse(request, `approvals-write:${authorized}`, 20, 60_000)
+  if (limited) return limited
   const parsed = resolveSchema.safeParse(await request.json().catch(() => null))
   if (!parsed.success) return Response.json({ error: "Neplatné rozhodnutí." }, { status: 400 })
   try {

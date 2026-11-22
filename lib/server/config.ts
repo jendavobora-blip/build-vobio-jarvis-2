@@ -58,6 +58,7 @@ export function isLiveAvailable(): boolean {
       serverConfig.accessCode &&
       serverConfig.ownerId &&
       serverConfig.sessionSecret &&
-      serverConfig.encryptionSecret,
+      serverConfig.encryptionSecret &&
+      serverConfig.databaseUrl,
   )
 }
