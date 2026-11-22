@@ -11,7 +11,7 @@ interface HudCoreProps {
 
 export function HudCore({ active, label, sublabel, className }: HudCoreProps) {
   return (
-    <div className={cn("relative mx-auto aspect-square w-full max-w-[280px]", active && "is-active", className)}>
+    <div className={cn("hud-core-3d relative mx-auto aspect-square w-full max-w-[280px]", active && "is-active", className)}>
       <div
         aria-hidden="true"
         className="core-pulse absolute inset-[18%] rounded-full bg-[radial-gradient(circle,rgba(34,211,238,0.35)_0%,rgba(34,211,238,0.08)_45%,transparent_70%)] blur-xl"

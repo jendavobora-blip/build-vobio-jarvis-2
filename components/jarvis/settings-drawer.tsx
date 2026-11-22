@@ -26,7 +26,7 @@ interface SettingsDrawerProps {
 export function SettingsDrawer(props: SettingsDrawerProps) {
   const { open, onClose, settings, setSettings, status, statusError, lifetime } = props
   const patch = (p: Partial<JarvisSettings>) => setSettings((s) => ({ ...s, ...p }))
-  const liveReady = Boolean(status?.deepseekConfigured && status.authConfigured)
+  const liveReady = Boolean(status?.liveEnabled && status.deepseekConfigured && status.authConfigured)
 
   return (
     <SlideOver open={open} onClose={onClose} title="Nastavení" description="Připojení, agenti, rozpočet a zabezpečení.">
@@ -38,6 +38,7 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
             </p>
           )}
           <StatusRow ok={Boolean(status?.deepseekConfigured)} label="DeepSeek API" detail={status?.deepseekConfigured ? "Klíč je nastaven na serveru" : "Chybí DEEPSEEK_API_KEY"} />
+          <StatusRow ok={Boolean(status?.liveEnabled)} label="Povolení živého backendu" detail={status?.liveEnabled ? "Serverový přepínač je zapnutý" : "Zablokováno do schválení designu"} />
           <StatusRow ok={Boolean(status?.authConfigured)} label="Přihlášení" detail={status?.authConfigured ? "Přístupový kód je nastaven" : "Chybí JARVIS_ACCESS_CODE (min. 8 znaků)"} />
           <StatusRow ok={Boolean(status?.authenticated)} label="Relace" detail={status?.authenticated ? "Přihlášeno" : "Nepřihlášeno"} />
           <StatusRow ok={Boolean(status?.databaseConfigured)} label="Databáze (volitelná)" detail={status?.databaseConfigured ? "DATABASE_URL nastavena" : "Paměť jen v tomto zařízení"} optional />
@@ -47,7 +48,7 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
         <Section title="Režim">
           <Toggle
             label="Živý režim (skutečná volání DeepSeek)"
-            hint={liveReady ? (status?.authenticated ? "Vypnutím přejdete do DEMO REŽIMU." : "Nejprve se přihlaste.") : "Nedostupné – chybí konfigurace serveru."}
+            hint={liveReady ? (status?.authenticated ? "Vypnutím přejdete do DEMO REŽIMU." : "Nejprve se přihlaste.") : "Nedostupné – čeká na schválení designu a povolení serveru."}
             checked={settings.liveMode && liveReady}
             disabled={!liveReady}
             onChange={(v) => patch({ liveMode: v })}
@@ -149,7 +150,7 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
         </Section>
 
         <p className="pb-4 text-center font-mono text-[10px] uppercase tracking-[0.25em] text-muted-foreground/60">
-          VOBIO JARVIS 2.0 · Jan Vobora
+          VOBIO JARVIS · Jan Vobora
         </p>
       </div>
     </SlideOver>

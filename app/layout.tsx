@@ -1,10 +1,6 @@
 import { Analytics } from '@vercel/analytics/next'
 import type { Metadata, Viewport } from 'next'
-import { Geist, Geist_Mono } from 'next/font/google'
 import './globals.css'
-
-const geist = Geist({ subsets: ['latin', 'latin-ext'], variable: '--font-geist-sans' })
-const geistMono = Geist_Mono({ subsets: ['latin', 'latin-ext'], variable: '--font-geist-mono' })
 
 export const metadata: Metadata = {
   title: 'VOBIO JARVIS',
@@ -35,7 +31,7 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="cs" className={`${geist.variable} ${geistMono.variable} bg-background`}>
+    <html lang="cs" className="bg-background">
       <body className="antialiased">
         {children}
         {process.env.NODE_ENV === 'production' && <Analytics />}

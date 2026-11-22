@@ -32,7 +32,7 @@ export async function POST(request: Request) {
   store.set(SESSION_COOKIE, session.token, {
     httpOnly: true,
     secure: true,
-    sameSite: "none",
+    sameSite: "lax",
     path: "/",
     maxAge: session.maxAge,
   })
@@ -41,6 +41,6 @@ export async function POST(request: Request) {
 
 export async function DELETE() {
   const store = await cookies()
-  store.set(SESSION_COOKIE, "", { httpOnly: true, secure: true, sameSite: "none", path: "/", maxAge: 0 })
+  store.set(SESSION_COOKIE, "", { httpOnly: true, secure: true, sameSite: "lax", path: "/", maxAge: 0 })
   return Response.json({ ok: true })
 }

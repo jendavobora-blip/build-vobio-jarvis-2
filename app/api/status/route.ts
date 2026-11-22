@@ -10,6 +10,7 @@ export async function GET() {
   const authenticated = await isAuthenticated()
   const body: StatusResponse = {
     deepseekConfigured: Boolean(serverConfig.deepseekKey),
+    liveEnabled: serverConfig.liveEnabled,
     authConfigured: Boolean(serverConfig.accessCode),
     authenticated,
     databaseConfigured: isDatabaseConfigured(),

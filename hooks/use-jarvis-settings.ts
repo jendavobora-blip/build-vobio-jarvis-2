@@ -64,5 +64,5 @@ export function useServerStatus() {
 
 /** Live execution requires a server key, configured auth, a valid session and the user toggle. */
 export function canRunLive(status: StatusResponse | undefined, settings: JarvisSettings): boolean {
-  return Boolean(status?.deepseekConfigured && status.authConfigured && status.authenticated && settings.liveMode)
+  return Boolean(status?.liveEnabled && status.deepseekConfigured && status.authConfigured && status.authenticated && settings.liveMode)
 }

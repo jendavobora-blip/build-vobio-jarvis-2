@@ -1,4 +1,5 @@
 import "server-only"
+import { isLiveAccessEnabled } from "@/lib/jarvis/live-access"
 
 function numberEnv(name: string, fallback: number, min: number, max: number): number {
   const raw = process.env[name]
@@ -19,6 +20,9 @@ export const serverConfig = {
   get databaseUrl(): string | undefined {
     return process.env.DATABASE_URL?.trim() || undefined
   },
+  get liveEnabled(): boolean {
+    return isLiveAccessEnabled(process.env.JARVIS_LIVE_ENABLED)
+  },
   limits: {
     get maxRequestUsd() {
       return numberEnv("JARVIS_MAX_REQUEST_USD", 0.05, 0.001, 5)
@@ -36,5 +40,5 @@ export const serverConfig = {
 }
 
 export function isLiveAvailable(): boolean {
-  return Boolean(serverConfig.deepseekKey && serverConfig.accessCode)
+  return Boolean(serverConfig.liveEnabled && serverConfig.deepseekKey && serverConfig.accessCode)
 }

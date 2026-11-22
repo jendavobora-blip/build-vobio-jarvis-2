@@ -83,6 +83,7 @@ export type RunEvent =
 
 export interface StatusResponse {
   deepseekConfigured: boolean
+  liveEnabled: boolean
   authConfigured: boolean
   authenticated: boolean
   databaseConfigured: boolean
