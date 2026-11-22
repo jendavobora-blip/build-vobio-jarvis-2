@@ -79,7 +79,9 @@ test("Router delegates to legacy-compatible specialists and Final Judge returns 
   test("invited account passwords are salted and verified without storing plaintext", async () => {
     const password = "test-only-password-4-accounts"
     const encoded = await hashAccountPassword(password)
+    const independentlySalted = await hashAccountPassword(password)
     assert.notEqual(encoded, password)
+    assert.notEqual(encoded, independentlySalted)
     assert.match(encoded, /^scrypt-v1:/)
     assert.equal(await verifyAccountPassword(password, encoded), true)
     assert.equal(await verifyAccountPassword("different-password", encoded), false)
