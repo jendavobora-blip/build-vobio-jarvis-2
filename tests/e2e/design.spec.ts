@@ -92,3 +92,19 @@ test("unsupported voice recognition returns to the text composer", async ({ page
   await expect(page.getByLabel("Zadání pro JARVISe")).toBeVisible()
   await expect(page.getByLabel("Zadání pro JARVISe")).toBeFocused()
 })
+
+test("approvals screen is visible but unauthenticated plans cannot be stored", async ({ page }) => {
+  const responsePromise = page.waitForResponse((response) =>
+    response.url().endsWith("/api/approvals") && response.request().method() === "POST",
+  )
+  await page.goto("/")
+  await page.getByRole("button", { name: "Schválení", exact: true }).click()
+  await expect(page.getByRole("heading", { name: "Schválení konkrétních plánů" })).toBeVisible()
+  await page.getByLabel("Cílový systém").fill("GitHub")
+  await page.getByLabel("Akce", { exact: true }).fill("Vytvořit pull request")
+  await page.getByLabel(/Změny/).fill("Upravit zdrojový kód")
+  await page.getByLabel(/Dopady/).fill("Pouze návrh v samostatné větvi")
+  await page.getByRole("button", { name: "Předložit ke schválení" }).click()
+  expect((await responsePromise).status()).toBe(401)
+  await expect(page.getByText("Nejste přihlášeni.", { exact: true })).toBeVisible()
+})

@@ -6,8 +6,8 @@ Tento soubor zachycuje skutečný stav větve PR #1. **Aplikace není dokončena
 
 - [x] Živá AI volání jsou serverově vypnutá bez `JARVIS_LIVE_ENABLED=true`; Vercel Preview je vypíná i při nastavené hodnotě. Akceptace: test flagu a přímé POST `/api/chat` v Preview bez volání poskytovatele.
 - [ ] Před aktivací živého režimu musí vlastník schválit design **a zabezpečení**; produkce a placené služby se schvalují samostatně.
-- [~] Paměť je oddělena serverovou identitou relace a databázová migrace má vlastníka; pozvánky a plnohodnotné uživatelské účty zatím nejsou dokončené. Akceptace: owner-scoped dotazy a testy migrace.
-- [~] API schvalování vytvoří neměnný plán s SHA-256 hash a stav pending/approved/denied/executed; kritická akce zatím není propojena na UI ani spouštěč externího nástroje. Akceptace: unit test neměnného hash a negativní test změněného plánu.
+- [~] Vlastník je stabilní explicitní UUID `JARVIS_OWNER_ID`, nezávislé na rotovatelných tajemstvích. Relace a AES-GCM mají samostatné secrets; stará paměť se jednorázově zálohuje do `jarvis_memories_owner_backup` a převede na vlastníka. Záloha/obnova a starý šifrovací klíč vyžadují provozní ověření; pozvánky a samostatné účty nejsou implementované. Akceptace: unit test stabilního ID, verzované migrace, owner-scoped SQL a ověřená obnova zálohy.
+- [~] Schvalování má obrazovku, owner-scoped neměnný plán a hash, append-only auditní události a dvoufázové potvrzení kritického plánu. Jednorázový `consumeApproval` atomicky přechází pouze z `approved` na `executed`; žádné externí nástroje zatím nejsou připojené. Akceptace: E2E nepřihlášeného odmítnutí, integrační DB test změněného hashe, opakovaného použití a kritických přechodů; externí akce musí spotřebovat schválení před spuštěním.
 - [ ] Nahradit nejlepší možné limity po instancích a neatomické denní účtování centrální atomickou rezervací rozpočtu. Akceptace: paralelní požadavky nepřekročí sjednaný limit v několika instancích; chyby DB vedou k bezpečnému odmítnutí.
 - [ ] Zavést důvěryhodné určení klienta, ochranu proti CSRF a distribuované omezení pokusů o přihlášení; prověřit proxy a původ požadavků. Akceptace: automatizované negativní testy ve více instancích.
 - [ ] Před nasazením vývojových agentů nahradit současné manuální AI workflow izolovaným běhovým prostředím bez přístupu k neoprávněným repozitářům a secrets a s vynucenými pravidly mimo model. Akceptace: test pokusů o únik dat, úpravu pravidel a neautorizované akce.
@@ -21,7 +21,7 @@ Tento soubor zachycuje skutečný stav větve PR #1. **Aplikace není dokončena
 - [ ] Development Studio: autorizovaný repozitář, izolované změny, testy a PR. Akceptace: auditovatelný průchod ve schváleném rozsahu bez přístupu k produkčním tajemstvím.
 - [~] Projects: pouze ukázkové položky, nikoli uživatelské projekty. Akceptace: oddělený katalog skutečných technologií a import pouze oprávněných GitHub repozitářů.
 - [ ] Approvals: bezpečné schvalování plánů a jejich verzí. Akceptace: změněný plán vyžaduje nové potvrzení, kritické akce samostatné potvrzení.
-- [~] Memory: lokální a volitelná databázová paměť, import/export, hledání v názvu a obsahu a šifrování citlivého obsahu. Chybí izolace uživatelů a bezpečná migrace. Akceptace: testy izolace, obnovy, exportu a mazání.
+- [~] Memory: lokální a volitelná databázová paměť, import/export, hledání v názvu a obsahu a šifrování citlivého obsahu; databáze filtruje stabilní owner ID. Samostatní uživatelé, ověřená obnova a testy izolace tenantů chybí. Akceptace: testy izolace více účtů, obnovy, exportu a mazání.
 - [~] Settings: stávající nastavení připojení, agentů, rozpočtu a hlasu; chybí účty a správa integrací. Akceptace: serverově vynucená práva a bezpečné relace.
 - [~] Funkce první etapy (hlas, rutiny a analytika) jsou stále dostupné v samostatných obrazovkách; při přechodu na cílovou navigaci se nesmí ztratit.
 
@@ -46,7 +46,7 @@ Tento soubor zachycuje skutečný stav větve PR #1. **Aplikace není dokončena
 ## Účty, paměť a schvalování
 
 - [ ] Navrhnout vlastníka a pozvánky, autentizaci, oddělení dat po uživatelích, šifrování, historii a nedestruktivní migrace. Současný přístupový kód neposkytuje uživatelskou izolaci. Akceptace: testy izolace tenantů, expirovaných relací, změny klíče, exportu, mazání a obnovení zálohy.
-- [ ] Implementovat autonomii C jako serverem vynucený auditovaný stavový automat se svázáním souhlasu s neměnným plánem. Akceptace: žádná externí akce bez správného souhlasu, opakované přehrání a změna plánu jsou odmítnuty.
+- [~] Implementovat autonomii C jako serverem vynucený auditovaný stavový automat se svázáním souhlasu s neměnným plánem. Přechody plánu a jednorázové spotřebování jsou serverové; externí akce nejsou implementované. Akceptace: integrační DB test, že žádná externí akce neproběhne bez správného souhlasu a opakované přehrání/změna plánu jsou odmítnuty.
 
 ## Testování a pokračování
 

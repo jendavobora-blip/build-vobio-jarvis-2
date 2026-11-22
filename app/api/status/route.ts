@@ -11,7 +11,7 @@ export async function GET() {
   const body: StatusResponse = {
     deepseekConfigured: Boolean(serverConfig.deepseekKey),
     liveEnabled: serverConfig.liveEnabled,
-    authConfigured: Boolean(serverConfig.accessCode),
+    authConfigured: Boolean(serverConfig.accessCode && serverConfig.ownerId && serverConfig.sessionSecret && serverConfig.encryptionSecret),
     authenticated,
     databaseConfigured: isDatabaseConfigured(),
     limits: {

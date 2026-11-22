@@ -13,6 +13,7 @@ import { SettingsDrawer } from "./settings-drawer"
 import { SpatialVisualization } from "./spatial-visualization"
 import {
   AnalyticsScreen,
+  ApprovalsScreen,
   AutomationsScreen,
   MemoryScreen,
   ProjectsScreen,
@@ -228,6 +229,7 @@ export function JarvisApp() {
             {view === "projects" && <ProjectsScreen onUse={(project: JarvisProject) => { setInput(project.prompt); setView("command"); window.setTimeout(() => inputRef.current?.focus(), 0) }} />}
             {view === "automations" && <AutomationsScreen />}
             {view === "voice" && <VoiceScreen listening={voice.listening} speaking={voice.speaking} supported={voice.recognitionSupported} canSpeak={voice.synthesisSupported} error={voice.error ?? hint} onMic={handleMic} onSpeak={() => voice.speak("Dobrý den, JARVIS je připraven. Hlasové ovládání se spouští pouze po vašem klepnutí.")} onStop={voice.stopSpeaking} />}
+            {view === "approvals" && <ApprovalsScreen />}
             {view === "memory" && <MemoryScreen items={memory.items} cloudAvailable={cloudAvailable} onOpen={() => setMemoryOpen(true)} />}
             {view === "analytics" && <AnalyticsScreen lifetime={lifetime} status={status.data} run={run} />}
             {view === "settings" && <SettingsScreen settings={settings} liveEnabled={Boolean(status.data?.liveEnabled)} onOpen={() => setSettingsOpen(true)} />}

@@ -1,7 +1,7 @@
 "use client"
 
-import { BarChart3, Cloud, HardDrive, LockKeyhole, Mic, Pause, Play, Settings2, Sparkles } from "lucide-react"
-import { useMemo, useState } from "react"
+import { BarChart3, Cloud, HardDrive, LockKeyhole, Mic, Pause, Play, Settings2, ShieldCheck, Sparkles } from "lucide-react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { useLocalState } from "@/lib/jarvis/local-store"
 import { filterProjects, PROJECTS, type JarvisProject } from "@/lib/jarvis/projects"
 import { formatUsd } from "@/lib/jarvis/pricing"
@@ -106,6 +106,144 @@ export function VoiceScreen({ listening, speaking, supported, canSpeak, error, o
         <div><p className="font-medium">Test českého předčítání</p><p className="text-xs text-muted-foreground">{canSpeak ? "Používá hlas dostupný v systému." : "Syntéza řeči není v tomto prohlížeči podporována."}</p></div>
         <button type="button" disabled={!canSpeak} onClick={speaking ? onStop : onSpeak} className="flex min-h-11 shrink-0 items-center gap-2 rounded-xl bg-secondary px-3 text-sm disabled:opacity-40">{speaking ? <Pause className="size-4" aria-hidden="true" /> : <Play className="size-4" aria-hidden="true" />}{speaking ? "Zastavit" : "Přehrát"}</button>
       </div>
+    </section>
+  )
+}
+
+interface ApprovalItem {
+  id: string
+  plan_hash: string
+  plan_json: string
+  status: "pending" | "critical_reviewed" | "approved" | "denied" | "executed"
+  created_at: string
+}
+
+interface ApprovalAuditItem {
+  approval_id: string
+  event: string
+  created_at: string
+}
+
+export function ApprovalsScreen() {
+  const [items, setItems] = useState<ApprovalItem[]>([])
+  const [audit, setAudit] = useState<ApprovalAuditItem[]>([])
+  const [target, setTarget] = useState("")
+  const [action, setAction] = useState("")
+  const [changes, setChanges] = useState("")
+  const [impacts, setImpacts] = useState("")
+  const [critical, setCritical] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  const refresh = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const response = await fetch("/api/approvals", { cache: "no-store" })
+      const body = await response.json()
+      if (!response.ok) throw new Error(body.error ?? "Schválení nelze načíst.")
+      setItems(body.items)
+      setAudit(body.audit)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Schválení nelze načíst.")
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void refresh()
+  }, [refresh])
+
+  const submitPlan = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setMessage(null)
+    setError(null)
+    try {
+      const response = await fetch("/api/approvals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          target: target.trim(),
+          action: action.trim(),
+          changes: changes.split("\n").map((item) => item.trim()).filter(Boolean),
+          impacts: impacts.split("\n").map((item) => item.trim()).filter(Boolean),
+          critical,
+        }),
+      })
+      const body = await response.json()
+      if (!response.ok) throw new Error(body.error ?? "Plán nelze uložit.")
+      setTarget("")
+      setAction("")
+      setChanges("")
+      setImpacts("")
+      setCritical(false)
+      setMessage("Neměnný plán byl uložen. Žádná externí akce nebyla provedena.")
+      await refresh()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Plán nelze uložit.")
+    }
+  }
+
+  const decide = async (item: ApprovalItem, decision: "approve" | "confirm_critical" | "deny") => {
+    setMessage(null)
+    setError(null)
+    try {
+      const response = await fetch("/api/approvals", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: item.id, planHash: item.plan_hash, decision }),
+      })
+      const body = await response.json()
+      if (!response.ok) throw new Error(body.error ?? "Rozhodnutí nelze uložit.")
+      setMessage("Souhlas byl zaznamenán. JARVIS neprovádí externí akce.")
+      await refresh()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Rozhodnutí nelze uložit.")
+    }
+  }
+
+  return (
+    <section className="space-y-4">
+      <ScreenIntro eyebrow="Autonomie C" title="Schválení konkrétních plánů" detail="Souhlas se váže na přesný hash plánu a změna plánu vyžaduje nové schválení. Tato verze zaznamenává souhlas, ale nespouští externí akce." />
+      <button type="button" onClick={refresh} disabled={loading} className="min-h-11 rounded-xl bg-secondary px-4 text-sm font-medium disabled:opacity-50">{loading ? "Načítám…" : "Načíst plány a audit"}</button>
+      <form onSubmit={submitPlan} className="glass space-y-3 rounded-2xl p-4">
+        <h3 className="font-semibold">Předložit přesný plán</h3>
+        <label className="block text-sm">Cílový systém<input required maxLength={200} value={target} onChange={(event) => setTarget(event.target.value)} className="mt-1 min-h-11 w-full rounded-xl border border-input bg-background px-3" /></label>
+        <label className="block text-sm">Akce<input required maxLength={200} value={action} onChange={(event) => setAction(event.target.value)} className="mt-1 min-h-11 w-full rounded-xl border border-input bg-background px-3" /></label>
+        <label className="block text-sm">Změny (každá na samostatný řádek)<textarea required value={changes} onChange={(event) => setChanges(event.target.value)} className="mt-1 min-h-20 w-full rounded-xl border border-input bg-background p-3" /></label>
+        <label className="block text-sm">Dopady (každý na samostatný řádek)<textarea required value={impacts} onChange={(event) => setImpacts(event.target.value)} className="mt-1 min-h-20 w-full rounded-xl border border-input bg-background p-3" /></label>
+        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={critical} onChange={(event) => setCritical(event.target.checked)} className="size-5 accent-primary" />Kritická akce (platba, mazání, oprávnění nebo produkce)</label>
+        <button type="submit" className="min-h-11 rounded-xl bg-primary px-4 text-sm font-semibold text-primary-foreground">Předložit ke schválení</button>
+      </form>
+      {error && <p role="alert" className="rounded-xl border border-destructive/40 p-3 text-sm text-destructive">{error}</p>}
+      {message && <p role="status" className="rounded-xl border border-primary/30 p-3 text-sm">{message}</p>}
+      <div className="space-y-3">
+        {items.map((item) => {
+          const plan = JSON.parse(item.plan_json) as { target: string; action: string; changes: string[]; impacts: string[]; critical: boolean }
+          return (
+            <article key={item.id} className="glass space-y-3 rounded-2xl p-4">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="font-semibold">{plan.action}</h3>
+                <span className="rounded-full bg-secondary px-3 py-1 text-xs">{item.status}</span>
+              </div>
+              <p className="text-sm text-muted-foreground">Cíl: {plan.target}</p>
+              <p className="text-xs text-muted-foreground">Hash plánu: <code>{item.plan_hash}</code></p>
+              <div className="text-sm"><p className="font-medium">Změny</p><ul className="ml-5 list-disc">{plan.changes.map((change) => <li key={change}>{change}</li>)}</ul></div>
+              <div className="text-sm"><p className="font-medium">Dopady</p><ul className="ml-5 list-disc">{plan.impacts.map((impact) => <li key={impact}>{impact}</li>)}</ul></div>
+              {item.status === "pending" && <div className="flex gap-2"><button type="button" onClick={() => decide(item, "approve")} className="min-h-10 rounded-xl bg-primary px-3 text-sm text-primary-foreground">Schválit plán</button><button type="button" onClick={() => decide(item, "deny")} className="min-h-10 rounded-xl bg-secondary px-3 text-sm">Zamítnout</button></div>}
+              {item.status === "critical_reviewed" && <div className="rounded-xl border border-warning/40 p-3"><p className="mb-2 text-sm">Kritická akce vyžaduje samostatné druhé potvrzení.</p><div className="flex gap-2"><button type="button" onClick={() => decide(item, "confirm_critical")} className="min-h-10 rounded-xl bg-warning px-3 text-sm">Potvrdit kritickou akci</button><button type="button" onClick={() => decide(item, "deny")} className="min-h-10 rounded-xl bg-secondary px-3 text-sm">Zamítnout</button></div></div>}
+              {item.status === "approved" && <p className="text-sm text-primary"><ShieldCheck className="mr-1 inline size-4" aria-hidden="true" />Souhlas zaznamenán; bez připojeného schváleného nástroje se nic neprovede.</p>}
+            </article>
+          )
+        })}
+        {items.length === 0 && !loading && <p className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">Zatím nejsou žádné schvalovací plány. Databáze a přihlášení jsou nutné pro ukládání.</p>}
+      </div>
+      <details className="glass rounded-2xl p-4">
+        <summary className="cursor-pointer font-semibold">Auditní záznamy ({audit.length})</summary>
+        <ol className="mt-3 space-y-2 text-sm">{audit.map((entry, index) => <li key={`${entry.approval_id}-${entry.event}-${index}`} className="border-t border-border pt-2">{entry.event} · plán {entry.approval_id} · {new Date(entry.created_at).toLocaleString("cs-CZ")}</li>)}</ol>
+      </details>
     </section>
   )
 }

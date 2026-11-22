@@ -7,12 +7,7 @@ export const SESSION_COOKIE = "jarvis_session"
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 14
 
 function secretMaterial(): string | undefined {
-  const explicit = process.env.JARVIS_SESSION_SECRET?.trim()
-  if (explicit && explicit.length >= 32) return explicit
-  const code = serverConfig.accessCode
-  if (!code) return undefined
-  // Derived fallback so a single access-code variable is enough; rotating the code invalidates sessions.
-  return `derived:${code}:${serverConfig.deepseekKey ?? "no-key"}`
+  return serverConfig.sessionSecret
 }
 
 function signingKey(): Buffer | undefined {
@@ -21,7 +16,7 @@ function signingKey(): Buffer | undefined {
 }
 
 export function encryptionKey(): Buffer | undefined {
-  const material = secretMaterial()
+  const material = serverConfig.encryptionSecret
   return material ? createHash("sha256").update(`enc|${material}`).digest() : undefined
 }
 
@@ -43,17 +38,16 @@ export function verifyAccessCode(input: string): boolean {
 
 export function createSessionToken(): { token: string; maxAge: number } | undefined {
   const key = signingKey()
-  if (!key) return undefined
   const subject = ownerId()
+  if (!key || !subject) return undefined
   const payload = Buffer.from(
     JSON.stringify({ exp: Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS, sub: subject, n: randomBytes(8).toString("hex") }),
   ).toString("base64url")
   return { token: `${payload}.${sign(payload, key)}`, maxAge: SESSION_TTL_SECONDS }
 }
 
-export function ownerId(): string {
-  const material = secretMaterial() ?? "unconfigured"
-  return createHash("sha256").update(`owner|${material}`).digest("base64url")
+export function ownerId(): string | undefined {
+  return serverConfig.ownerId
 }
 
 async function sessionOwnerId(): Promise<string | undefined> {
@@ -89,8 +83,7 @@ export function isValidSessionToken(token: string | undefined): boolean {
 }
 
 export async function isAuthenticated(): Promise<boolean> {
-  const store = await cookies()
-  return isValidSessionToken(store.get(SESSION_COOKIE)?.value)
+  return Boolean(await sessionOwnerId())
 }
 
 export function encryptText(plain: string): string {
@@ -104,14 +97,19 @@ export function encryptText(plain: string): string {
 
 export function decryptText(value: string): string {
   if (!value.startsWith("enc:v1:")) return value
-  const key = encryptionKey()
-  if (!key) return "[zašifrováno]"
   const [, , iv, tag, data] = value.split(":")
-  try {
-    const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(iv, "base64url"))
-    decipher.setAuthTag(Buffer.from(tag, "base64url"))
-    return Buffer.concat([decipher.update(Buffer.from(data, "base64url")), decipher.final()]).toString("utf8")
-  } catch {
-    return "[nelze dešifrovat – změnil se tajný klíč]"
+  const keys = [encryptionKey()]
+  const legacyMaterial = process.env.JARVIS_LEGACY_ENCRYPTION_KEY
+  if (legacyMaterial) keys.push(createHash("sha256").update(`enc|${legacyMaterial}`).digest())
+  for (const key of keys) {
+    if (!key) continue
+    try {
+      const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(iv, "base64url"))
+      decipher.setAuthTag(Buffer.from(tag, "base64url"))
+      return Buffer.concat([decipher.update(Buffer.from(data, "base64url")), decipher.final()]).toString("utf8")
+    } catch {
+      continue
+    }
   }
+  return "[nelze dešifrovat – ověřte JARVIS_ENCRYPTION_KEY a případný JARVIS_LEGACY_ENCRYPTION_KEY]"
 }

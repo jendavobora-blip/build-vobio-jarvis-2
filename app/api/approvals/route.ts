@@ -1,6 +1,6 @@
 import { z } from "zod"
 import { authenticatedOwnerId } from "@/lib/server/auth"
-import { isDatabaseConfigured, createApproval, listApprovals, resolveApproval } from "@/lib/server/db"
+import { isDatabaseConfigured, createApproval, listApprovalAudit, listApprovals, resolveApproval } from "@/lib/server/db"
 import { approvalHash, approvalId, approvalPlanSchema } from "@/lib/server/approvals"
 
 export const runtime = "nodejs"
@@ -9,12 +9,12 @@ export const dynamic = "force-dynamic"
 const resolveSchema = z.object({
   id: z.string().uuid(),
   planHash: z.string().length(43),
-  decision: z.enum(["approved", "denied"]),
+  decision: z.enum(["approve", "confirm_critical", "deny"]),
 })
 
 function sameOrigin(request: Request): boolean {
   const origin = request.headers.get("origin")
-  if (!origin) return true
+  if (!origin) return false
   try {
     return new URL(origin).origin === new URL(request.url).origin
   } catch {
@@ -23,17 +23,23 @@ function sameOrigin(request: Request): boolean {
 }
 
 async function owner(request: Request): Promise<string | Response> {
-  if (!isDatabaseConfigured()) return Response.json({ error: "Schvalování vyžaduje DATABASE_URL." }, { status: 501 })
   if (!sameOrigin(request)) return Response.json({ error: "Neplatný původ požadavku." }, { status: 403 })
   const ownerId = await authenticatedOwnerId()
-  return ownerId ?? (Response.json({ error: "Nejste přihlášeni." }, { status: 401 }) as unknown as string)
+  if (!ownerId) return Response.json({ error: "Nejste přihlášeni." }, { status: 401 })
+  if (!isDatabaseConfigured()) return Response.json({ error: "Schvalování vyžaduje DATABASE_URL." }, { status: 501 })
+  return ownerId
 }
 
 export async function GET() {
   const ownerId = await authenticatedOwnerId()
   if (!ownerId) return Response.json({ error: "Nejste přihlášeni." }, { status: 401 })
-  if (!isDatabaseConfigured()) return Response.json({ items: [] }, { status: 200 })
-  return Response.json({ items: await listApprovals(ownerId) }, { headers: { "Cache-Control": "no-store" } })
+  if (!isDatabaseConfigured()) return Response.json({ error: "Schvalování vyžaduje DATABASE_URL." }, { status: 501 })
+  try {
+    const [items, audit] = await Promise.all([listApprovals(ownerId), listApprovalAudit(ownerId)])
+    return Response.json({ items, audit }, { headers: { "Cache-Control": "no-store" } })
+  } catch {
+    return Response.json({ error: "Auditní databáze není dostupná." }, { status: 502 })
+  }
 }
 
 export async function POST(request: Request) {

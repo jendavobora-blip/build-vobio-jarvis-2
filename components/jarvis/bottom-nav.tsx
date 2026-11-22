@@ -8,6 +8,7 @@ import {
   Mic,
   Radar,
   Settings2,
+  ShieldCheck,
   Timer,
   Users,
   type LucideIcon,
@@ -21,6 +22,7 @@ export type JarvisView =
   | "projects"
   | "automations"
   | "voice"
+  | "approvals"
   | "memory"
   | "analytics"
   | "settings"
@@ -32,6 +34,7 @@ const SCREENS: { id: JarvisView; label: string; icon: LucideIcon }[] = [
   { id: "projects", label: "Projekty", icon: FolderKanban },
   { id: "automations", label: "Rutiny", icon: Timer },
   { id: "voice", label: "Hlas", icon: Mic },
+  { id: "approvals", label: "Schválení", icon: ShieldCheck },
   { id: "memory", label: "Paměť", icon: Brain },
   { id: "analytics", label: "Přehled", icon: BarChart3 },
   { id: "settings", label: "Nastavení", icon: Settings2 },

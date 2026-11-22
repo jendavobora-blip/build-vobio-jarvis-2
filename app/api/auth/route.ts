@@ -8,10 +8,21 @@ export const runtime = "nodejs"
 
 const schema = z.object({ code: z.string().min(1).max(256) })
 
+function sameOrigin(request: Request): boolean {
+  const origin = request.headers.get("origin")
+  if (!origin) return false
+  try {
+    return new URL(origin).origin === new URL(request.url).origin
+  } catch {
+    return false
+  }
+}
+
 export async function POST(request: Request) {
-  if (!serverConfig.accessCode) {
+  if (!sameOrigin(request)) return Response.json({ error: "Neplatný původ požadavku." }, { status: 403 })
+  if (!serverConfig.accessCode || !serverConfig.ownerId || !serverConfig.sessionSecret || !serverConfig.encryptionSecret) {
     return Response.json(
-      { error: "Přihlášení není nastaveno. Přidejte proměnnou JARVIS_ACCESS_CODE (min. 8 znaků)." },
+      { error: "Přihlášení není bezpečně nakonfigurováno. Nastavte JARVIS_ACCESS_CODE, stabilní JARVIS_OWNER_ID, JARVIS_SESSION_SECRET a JARVIS_ENCRYPTION_KEY." },
       { status: 503 },
     )
   }
