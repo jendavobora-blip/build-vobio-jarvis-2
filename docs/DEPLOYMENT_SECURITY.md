@@ -15,7 +15,7 @@ Chybějící nebo neplatný `JARVIS_OWNER_ID` blokuje přihlášení a databázo
 
 ## Migrace původní paměti
 
-První spuštění nové migrace uloží dosavadní řádky do `jarvis_memories_owner_backup`, převede původní jednovlastnické záznamy na nakonfigurované UUID a změní klíč tabulky na `(id, owner_id)`. Záloha je zachována pro obnovu. Migrace se zaznamená do `jarvis_schema_migrations` a znovu nepřiřazuje později vytvořená uživatelská data.
+První spuštění nové migrace v jedné databázové transakci uloží dosavadní řádky do `jarvis_memories_owner_backup`, převede původní jednovlastnické záznamy na nakonfigurované UUID a změní klíč tabulky na `(id, owner_id)`. Záloha je zachována pro obnovu. Migrace se zaznamená do `jarvis_schema_migrations` a znovu nepřiřazuje později vytvořená uživatelská data.
 
 Před migrací zachovejte databázovou zálohu. Pokud starší citlivá data byla zašifrována původním klíčem, nastavte dočasně `JARVIS_LEGACY_ENCRYPTION_KEY` na původní materiál klíče ze správce tajemství. U dřívější konfigurace bez explicitního session secretu šlo o původní hodnotu odvozenou ve formátu `derived:<původní přístupový kód>:<původní DeepSeek klíč nebo no-key>`. Hodnotu nikam nevkládejte do repozitáře, issue, logu ani chatu. Po ověření obnovy proveďte samostatnou řízenou migraci šifrování; tato verze automaticky staré ciphertexty nepřepisuje.
 

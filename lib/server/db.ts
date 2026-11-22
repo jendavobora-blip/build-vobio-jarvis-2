@@ -42,21 +42,23 @@ async function ensureSchema(sql: Sql) {
       id TEXT PRIMARY KEY, category TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL,
       sensitive BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL
     )`
-    await sql`INSERT INTO jarvis_memories_owner_backup (id, category, title, content, sensitive, created_at, updated_at)
-      SELECT id, category, title, content, sensitive, created_at, updated_at FROM jarvis_memories
-      WHERE NOT EXISTS (SELECT 1 FROM jarvis_schema_migrations WHERE version = ${OWNER_MIGRATION})
-      ON CONFLICT (id) DO NOTHING`
-    await sql`UPDATE jarvis_memories SET owner_id = ${stableOwnerId}
-      WHERE NOT EXISTS (SELECT 1 FROM jarvis_schema_migrations WHERE version = ${OWNER_MIGRATION})`
-    await sql`DO $migration$
-      BEGIN
-        IF NOT EXISTS (SELECT 1 FROM jarvis_schema_migrations WHERE version = '${OWNER_MIGRATION}') THEN
-          ALTER TABLE jarvis_memories DROP CONSTRAINT IF EXISTS jarvis_memories_pkey;
-          ALTER TABLE jarvis_memories ADD PRIMARY KEY (id, owner_id);
-        END IF;
-      END
-      $migration$`
-    await sql`INSERT INTO jarvis_schema_migrations (version) VALUES (${OWNER_MIGRATION}) ON CONFLICT (version) DO NOTHING`
+    await sql.transaction((tx) => [
+      tx`INSERT INTO jarvis_memories_owner_backup (id, category, title, content, sensitive, created_at, updated_at)
+        SELECT id, category, title, content, sensitive, created_at, updated_at FROM jarvis_memories
+        WHERE NOT EXISTS (SELECT 1 FROM jarvis_schema_migrations WHERE version = ${OWNER_MIGRATION})
+        ON CONFLICT (id) DO NOTHING`,
+      tx`UPDATE jarvis_memories SET owner_id = ${stableOwnerId}
+        WHERE NOT EXISTS (SELECT 1 FROM jarvis_schema_migrations WHERE version = ${OWNER_MIGRATION})`,
+      tx`DO $migration$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM jarvis_schema_migrations WHERE version = '${OWNER_MIGRATION}') THEN
+            ALTER TABLE jarvis_memories DROP CONSTRAINT IF EXISTS jarvis_memories_pkey;
+            ALTER TABLE jarvis_memories ADD PRIMARY KEY (id, owner_id);
+          END IF;
+        END
+        $migration$`,
+      tx`INSERT INTO jarvis_schema_migrations (version) VALUES (${OWNER_MIGRATION}) ON CONFLICT (version) DO NOTHING`,
+    ])
     await sql`CREATE TABLE IF NOT EXISTS jarvis_usage (
       day DATE PRIMARY KEY,
       cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,

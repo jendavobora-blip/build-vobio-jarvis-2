@@ -80,5 +80,6 @@ test("owner migration snapshots legacy memory and is version guarded", () => {
   const source = readFileSync("lib/server/db.ts", "utf8")
   assert.match(source, /jarvis_memories_owner_backup/)
   assert.match(source, /2026-11-stable-owner-v1/)
+  assert.match(source, /sql\.transaction\(\(tx\) => \[/)
   assert.match(source, /WHERE NOT EXISTS \(SELECT 1 FROM jarvis_schema_migrations/)
 })
