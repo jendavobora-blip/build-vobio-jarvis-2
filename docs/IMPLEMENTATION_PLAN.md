@@ -6,6 +6,8 @@ Tento soubor zachycuje skutečný stav větve PR #1. **Aplikace není dokončena
 
 - [x] Živá AI volání jsou serverově vypnutá bez `JARVIS_LIVE_ENABLED=true`; Vercel Preview je vypíná i při nastavené hodnotě. Akceptace: test flagu a přímé POST `/api/chat` v Preview bez volání poskytovatele.
 - [ ] Před aktivací živého režimu musí vlastník schválit design **a zabezpečení**; produkce a placené služby se schvalují samostatně.
+- [~] Paměť je oddělena serverovou identitou relace a databázová migrace má vlastníka; pozvánky a plnohodnotné uživatelské účty zatím nejsou dokončené. Akceptace: owner-scoped dotazy a testy migrace.
+- [~] API schvalování vytvoří neměnný plán s SHA-256 hash a stav pending/approved/denied/executed; kritická akce zatím není propojena na UI ani spouštěč externího nástroje. Akceptace: unit test neměnného hash a negativní test změněného plánu.
 - [ ] Nahradit nejlepší možné limity po instancích a neatomické denní účtování centrální atomickou rezervací rozpočtu. Akceptace: paralelní požadavky nepřekročí sjednaný limit v několika instancích; chyby DB vedou k bezpečnému odmítnutí.
 - [ ] Zavést důvěryhodné určení klienta, ochranu proti CSRF a distribuované omezení pokusů o přihlášení; prověřit proxy a původ požadavků. Akceptace: automatizované negativní testy ve více instancích.
 - [ ] Před nasazením vývojových agentů nahradit současné manuální AI workflow izolovaným běhovým prostředím bez přístupu k neoprávněným repozitářům a secrets a s vynucenými pravidly mimo model. Akceptace: test pokusů o únik dat, úpravu pravidel a neautorizované akce.

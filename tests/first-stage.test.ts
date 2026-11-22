@@ -6,6 +6,7 @@ import { filterProjects, PROJECTS } from "../lib/jarvis/projects"
 import { nextGraphicsQuality } from "../lib/jarvis/graphics-quality"
 import { filterMemories } from "../lib/jarvis/memory-filter"
 import { readFileSync } from "node:fs"
+import { approvalHash, approvalPlanSchema } from "../lib/server/approvals"
 
 test("live AI access stays off unless explicitly enabled by the server", () => {
   assert.equal(isLiveAccessEnabled(undefined), false)
@@ -51,4 +52,17 @@ test("DeepSeek workflow rejects staged, unstaged, and untracked workflow changes
   const workflow = readFileSync(".github/workflows/deepseek-coder.yml", "utf8")
   assert.match(workflow, /git status --porcelain=v1 -- \.github\/workflows/)
   assert.doesNotMatch(workflow, /git diff --name-only -- \.github\/workflows/)
+})
+
+test("approval plans are immutable and require an exact plan hash", () => {
+  const plan = approvalPlanSchema.parse({
+    target: "GitHub",
+    action: "Create pull request",
+    changes: ["Update src/app.ts"],
+    impacts: ["No production deployment"],
+    critical: false,
+  })
+  const hash = approvalHash(plan)
+  assert.equal(hash.length, 43)
+  assert.notEqual(hash, approvalHash({ ...plan, action: "Merge pull request" }))
 })

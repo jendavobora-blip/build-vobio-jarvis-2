@@ -1,7 +1,7 @@
 import "server-only"
 import { neon } from "@neondatabase/serverless"
 import { serverConfig } from "./config"
-import { decryptText, encryptText } from "./auth"
+import { decryptText, encryptText, ownerId } from "./auth"
 import type { MemoryItem } from "@/lib/jarvis/types"
 
 type Sql = ReturnType<typeof neon>
@@ -24,6 +24,7 @@ async function ensureSchema(sql: Sql) {
   schemaReady ??= (async () => {
     await sql`CREATE TABLE IF NOT EXISTS jarvis_memories (
       id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL DEFAULT 'legacy-owner',
       category TEXT NOT NULL,
       title TEXT NOT NULL,
       content TEXT NOT NULL,
@@ -31,11 +32,25 @@ async function ensureSchema(sql: Sql) {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )`
+    await sql`ALTER TABLE jarvis_memories ADD COLUMN IF NOT EXISTS owner_id TEXT`
+    await sql`UPDATE jarvis_memories SET owner_id = 'legacy-owner' WHERE owner_id IS NULL`
+    await sql`UPDATE jarvis_memories SET owner_id = ${ownerId()} WHERE owner_id = 'legacy-owner'`
+    await sql`ALTER TABLE jarvis_memories DROP CONSTRAINT IF EXISTS jarvis_memories_pkey`
+    await sql`ALTER TABLE jarvis_memories ADD PRIMARY KEY (id, owner_id)`
     await sql`CREATE TABLE IF NOT EXISTS jarvis_usage (
       day DATE PRIMARY KEY,
       cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
       tokens BIGINT NOT NULL DEFAULT 0,
       requests INTEGER NOT NULL DEFAULT 0
+    )`
+    await sql`CREATE TABLE IF NOT EXISTS jarvis_approvals (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      plan_hash TEXT NOT NULL,
+      plan_json TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'denied', 'executed')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      resolved_at TIMESTAMPTZ
     )`
   })().catch((error) => {
     schemaReady = undefined
@@ -73,27 +88,27 @@ function toItem(row: MemoryRow): MemoryItem {
   }
 }
 
-export async function listMemories(): Promise<MemoryItem[]> {
+export async function listMemories(ownerId: string): Promise<MemoryItem[]> {
   const sql = await db()
   if (!sql) return []
-  const rows = (await sql`SELECT * FROM jarvis_memories ORDER BY updated_at DESC LIMIT 500`) as MemoryRow[]
+  const rows = (await sql`SELECT * FROM jarvis_memories WHERE owner_id = ${ownerId} ORDER BY updated_at DESC LIMIT 500`) as MemoryRow[]
   return rows.map(toItem)
 }
 
-export async function upsertMemory(item: MemoryItem): Promise<void> {
+export async function upsertMemory(ownerId: string, item: MemoryItem): Promise<void> {
   const sql = await db()
   if (!sql) throw new Error("Databáze není nastavena.")
   const content = item.sensitive ? encryptText(item.content) : item.content
-  await sql`INSERT INTO jarvis_memories (id, category, title, content, sensitive, created_at, updated_at)
-    VALUES (${item.id}, ${item.category}, ${item.title}, ${content}, ${item.sensitive}, ${item.createdAt}, ${item.updatedAt})
-    ON CONFLICT (id) DO UPDATE SET category = EXCLUDED.category, title = EXCLUDED.title,
+  await sql`INSERT INTO jarvis_memories (id, owner_id, category, title, content, sensitive, created_at, updated_at)
+    VALUES (${item.id}, ${ownerId}, ${item.category}, ${item.title}, ${content}, ${item.sensitive}, ${item.createdAt}, ${item.updatedAt})
+    ON CONFLICT (id, owner_id) DO UPDATE SET category = EXCLUDED.category, title = EXCLUDED.title,
       content = EXCLUDED.content, sensitive = EXCLUDED.sensitive, updated_at = EXCLUDED.updated_at`
 }
 
-export async function deleteMemory(id: string): Promise<void> {
+export async function deleteMemory(ownerId: string, id: string): Promise<void> {
   const sql = await db()
   if (!sql) throw new Error("Databáze není nastavena.")
-  await sql`DELETE FROM jarvis_memories WHERE id = ${id}`
+  await sql`DELETE FROM jarvis_memories WHERE owner_id = ${ownerId} AND id = ${id}`
 }
 
 /* ---------- Daily spend ledger ---------- */
@@ -141,4 +156,51 @@ export async function recordUsage(costUsd: number, tokens: number): Promise<void
   } catch (error) {
     console.error("[jarvis] usage ledger write failed", error instanceof Error ? error.message : error)
   }
+}
+
+export interface ApprovalRow {
+  id: string
+  owner_id: string
+  plan_hash: string
+  plan_json: string
+  status: "pending" | "approved" | "denied" | "executed"
+  created_at: string | Date
+  resolved_at: string | Date | null
+}
+
+export async function createApproval(ownerId: string, id: string, planHash: string, planJson: string): Promise<ApprovalRow> {
+  const sql = await db()
+  if (!sql) throw new Error("Databáze není nastavena.")
+  const rows = (await sql`INSERT INTO jarvis_approvals (id, owner_id, plan_hash, plan_json, status)
+    VALUES (${id}, ${ownerId}, ${planHash}, ${planJson}, 'pending')
+    ON CONFLICT (id) DO NOTHING
+    RETURNING *`) as ApprovalRow[]
+  if (!rows[0]) {
+    const existing = (await sql`SELECT * FROM jarvis_approvals WHERE id = ${id} AND owner_id = ${ownerId} LIMIT 1`) as ApprovalRow[]
+    if (!existing[0]) throw new Error("Schvalování náleží jinému uživateli.")
+    if (existing[0].plan_hash !== planHash) throw new Error("Akce byla změněna a musí být předložena jako nový plán.")
+    return existing[0]
+  }
+  return rows[0]
+}
+
+export async function resolveApproval(
+  ownerId: string,
+  id: string,
+  planHash: string,
+  status: "approved" | "denied",
+): Promise<ApprovalRow | undefined> {
+  const sql = await db()
+  if (!sql) throw new Error("Databáze není nastavena.")
+  const rows = (await sql`UPDATE jarvis_approvals
+    SET status = ${status}, resolved_at = now()
+    WHERE id = ${id} AND owner_id = ${ownerId} AND plan_hash = ${planHash} AND status = 'pending'
+    RETURNING *`) as ApprovalRow[]
+  return rows[0]
+}
+
+export async function listApprovals(ownerId: string): Promise<ApprovalRow[]> {
+  const sql = await db()
+  if (!sql) return []
+  return (await sql`SELECT * FROM jarvis_approvals WHERE owner_id = ${ownerId} ORDER BY created_at DESC LIMIT 200`) as ApprovalRow[]
 }

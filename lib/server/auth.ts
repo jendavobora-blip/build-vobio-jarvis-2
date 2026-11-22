@@ -44,10 +44,34 @@ export function verifyAccessCode(input: string): boolean {
 export function createSessionToken(): { token: string; maxAge: number } | undefined {
   const key = signingKey()
   if (!key) return undefined
+  const subject = ownerId()
   const payload = Buffer.from(
-    JSON.stringify({ exp: Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS, n: randomBytes(8).toString("hex") }),
+    JSON.stringify({ exp: Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS, sub: subject, n: randomBytes(8).toString("hex") }),
   ).toString("base64url")
   return { token: `${payload}.${sign(payload, key)}`, maxAge: SESSION_TTL_SECONDS }
+}
+
+export function ownerId(): string {
+  const material = secretMaterial() ?? "unconfigured"
+  return createHash("sha256").update(`owner|${material}`).digest("base64url")
+}
+
+async function sessionOwnerId(): Promise<string | undefined> {
+  const store = await cookies()
+  const token = store.get(SESSION_COOKIE)?.value
+  if (!isValidSessionToken(token)) return undefined
+  const payload = token?.split(".")[0]
+  if (!payload) return undefined
+  try {
+    const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { sub?: string }
+    return data.sub === ownerId() ? data.sub : undefined
+  } catch {
+    return undefined
+  }
+}
+
+export async function authenticatedOwnerId(): Promise<string | undefined> {
+  return sessionOwnerId()
 }
 
 export function isValidSessionToken(token: string | undefined): boolean {

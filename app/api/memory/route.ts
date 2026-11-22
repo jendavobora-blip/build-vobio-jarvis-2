@@ -1,5 +1,5 @@
 import { z } from "zod"
-import { isAuthenticated } from "@/lib/server/auth"
+import { authenticatedOwnerId } from "@/lib/server/auth"
 import { deleteMemory, isDatabaseConfigured, listMemories, upsertMemory } from "@/lib/server/db"
 
 export const runtime = "nodejs"
@@ -19,7 +19,8 @@ async function guard(): Promise<Response | null> {
   if (!isDatabaseConfigured()) {
     return Response.json({ error: "Synchronizovaná paměť vyžaduje DATABASE_URL." }, { status: 501 })
   }
-  if (!(await isAuthenticated())) return Response.json({ error: "Nejste přihlášeni." }, { status: 401 })
+  const ownerId = await authenticatedOwnerId()
+  if (!ownerId) return Response.json({ error: "Nejste přihlášeni." }, { status: 401 })
   return null
 }
 
@@ -31,8 +32,10 @@ function failure(error: unknown) {
 export async function GET() {
   const blocked = await guard()
   if (blocked) return blocked
+  const ownerId = await authenticatedOwnerId()
+  if (!ownerId) return Response.json({ error: "Nejste přihlášeni." }, { status: 401 })
   try {
-    return Response.json({ items: await listMemories() }, { headers: { "Cache-Control": "no-store" } })
+    return Response.json({ items: await listMemories(ownerId) }, { headers: { "Cache-Control": "no-store" } })
   } catch (error) {
     return failure(error)
   }
@@ -41,10 +44,12 @@ export async function GET() {
 export async function PUT(request: Request) {
   const blocked = await guard()
   if (blocked) return blocked
+  const ownerId = await authenticatedOwnerId()
+  if (!ownerId) return Response.json({ error: "Nejste přihlášeni." }, { status: 401 })
   const parsed = itemSchema.safeParse(await request.json().catch(() => null))
   if (!parsed.success) return Response.json({ error: "Neplatná položka paměti." }, { status: 400 })
   try {
-    await upsertMemory(parsed.data)
+    await upsertMemory(ownerId, parsed.data)
     return Response.json({ ok: true })
   } catch (error) {
     return failure(error)
@@ -54,10 +59,12 @@ export async function PUT(request: Request) {
 export async function DELETE(request: Request) {
   const blocked = await guard()
   if (blocked) return blocked
+  const ownerId = await authenticatedOwnerId()
+  if (!ownerId) return Response.json({ error: "Nejste přihlášeni." }, { status: 401 })
   const id = new URL(request.url).searchParams.get("id")
   if (!id || id.length > 64) return Response.json({ error: "Chybí ID." }, { status: 400 })
   try {
-    await deleteMemory(id)
+    await deleteMemory(ownerId, id)
     return Response.json({ ok: true })
   } catch (error) {
     return failure(error)
