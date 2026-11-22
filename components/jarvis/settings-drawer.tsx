@@ -78,7 +78,7 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
         </Section>
 
         <Section title="Agenti">
-          <p className="text-xs text-muted-foreground">Orchestrátor je vždy aktivní a vybírá z povolených specialistů.</p>
+          <p className="text-xs text-muted-foreground">Router je vždy aktivní a vybírá z povolených specialistů.</p>
           {SPECIALISTS.map((id) => (
             <Toggle
               key={id}

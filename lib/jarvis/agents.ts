@@ -12,54 +12,71 @@ export interface AgentDefinition {
 export const AGENTS: Record<AgentId, AgentDefinition> = {
   orchestrator: {
     id: "orchestrator",
-    name: "Orchestrátor",
-    role: "Koordinuje úkoly a syntetizuje výsledky",
+    name: "Router",
+    role: "Vyhodnocuje zadání a vybírá oprávněné specialisty",
     color: "#22d3ee",
-    slot: { x: 27, y: 2 },
+    slot: { x: 2, y: 2 },
   },
   researcher: {
     id: "researcher",
-    name: "Výzkumník",
+    name: "Researcher",
     role: "Zkoumá zdroje a shromažďuje informace",
     color: "#60a5fa",
-    slot: { x: 2, y: 22 },
+    slot: { x: 52, y: 2 },
   },
   memory: {
     id: "memory",
     name: "Strážce paměti",
     role: "Vybírá relevantní kontext z uložené paměti",
     color: "#a78bfa",
-    slot: { x: 52, y: 22 },
+    slot: { x: 2, y: 26 },
   },
   planner: {
     id: "planner",
-    name: "Plánovač",
-    role: "Rozkládá cíle na proveditelné kroky",
+    name: "Architect",
+    role: "Navrhuje systémy a architekturu",
     color: "#34d399",
-    slot: { x: 2, y: 44 },
+    slot: { x: 52, y: 26 },
   },
   analyst: {
     id: "analyst",
-    name: "Analytik",
+    name: "Analyst",
     role: "Počítá, porovnává scénáře a hodnotí rizika",
     color: "#fbbf24",
-    slot: { x: 52, y: 44 },
+    slot: { x: 2, y: 50 },
   },
   creator: {
     id: "creator",
-    name: "Tvůrce",
-    role: "Píše obsah, návrhy kódu a české výstupy",
+    name: "Coder",
+    role: "Připravuje kód a technickou implementaci",
     color: "#f472b6",
-    slot: { x: 2, y: 66 },
+    slot: { x: 52, y: 50 },
   },
   auditor: {
     id: "auditor",
-    name: "Auditor",
-    role: "Kontroluje důkazy, rozpory a kvalitu",
+    name: "Critic",
+    role: "Oponuje výsledkům a odhaluje chyby a rizika",
     color: "#fb7185",
-    slot: { x: 52, y: 66 },
+    slot: { x: 2, y: 74 },
+  },
+  final_judge: {
+    id: "final_judge",
+    name: "Final Judge",
+    role: "Ověřuje závěry a připravuje finální syntézu",
+    color: "#c084fc",
+    slot: { x: 52, y: 74 },
   },
 }
+
+export const LEGACY_AGENT_ORDER: AgentId[] = [
+  "orchestrator",
+  "researcher",
+  "memory",
+  "planner",
+  "analyst",
+  "creator",
+  "auditor",
+]
 
 export const AGENT_ORDER: AgentId[] = [
   "orchestrator",
@@ -69,7 +86,40 @@ export const AGENT_ORDER: AgentId[] = [
   "analyst",
   "creator",
   "auditor",
+  "final_judge",
 ]
+
+export const TARGET_AGENT_ROLES = [
+  "router",
+  "researcher",
+  "architect",
+  "coder",
+  "analyst",
+  "critic",
+  "final_judge",
+] as const
+
+export type TargetAgentRole = (typeof TARGET_AGENT_ROLES)[number]
+
+export const TARGET_ROLE_TO_AGENT: Record<TargetAgentRole, AgentId> = {
+  router: "orchestrator",
+  researcher: "researcher",
+  architect: "planner",
+  coder: "creator",
+  analyst: "analyst",
+  critic: "auditor",
+  final_judge: "final_judge",
+}
+
+export const LEGACY_ROLE_TO_TARGET: Partial<Record<AgentId, TargetAgentRole>> = {
+  orchestrator: "router",
+  researcher: "researcher",
+  planner: "architect",
+  creator: "coder",
+  analyst: "analyst",
+  auditor: "critic",
+  final_judge: "final_judge",
+}
 
 export const SPECIALISTS: SpecialistId[] = [
   "researcher",

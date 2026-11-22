@@ -209,7 +209,7 @@ export function JarvisApp() {
 
             {view === "agents" && (
               <section className="space-y-4">
-                <ScreenHeading eyebrow="Tým agentů" title="Sedm specializovaných rolí" detail="Klepnutím na kartu zobrazíte roli a stav. Ukázková práce je vždy označena DEMO." />
+                <ScreenHeading eyebrow="Tým agentů" title="Sedm cílových rolí" detail="Router, Researcher, Architect, Coder, Analyst, Critic a Final Judge. Pomocná paměť zůstává kvůli kompatibilitě." />
                 <SpatialVisualization kind="agents" run={run} onInspect={setInspect} />
                 <AgentCanvas run={run} onInspect={setInspect} />
                 <ResultPanel run={run} speaking={voice.speaking} canSpeak={voice.synthesisSupported} onSpeak={voice.speak} onStopSpeaking={voice.stopSpeaking} />

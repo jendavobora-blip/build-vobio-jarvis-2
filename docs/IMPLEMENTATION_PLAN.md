@@ -16,11 +16,11 @@ Tento soubor zachycuje skutečný stav větve PR #1. **Aplikace není dokončena
 
 - [~] JARVIS Core: text, české diktování a předčítání v podporovaných prohlížečích, skutečný WebGL základ a 2D fallback. Chybí hlasové příkazy, vypínatelné zvukové efekty a ověření iOS Shortcuts. Akceptace: uživatelské testy na iPhonu včetně zamítnutí mikrofonu a omezení pohybu.
 - [~] Mission Control: stávající obrazovka Orchestrace zobrazuje stav a demo; není trvalá historie úloh. Akceptace: reálný průběh a obnovená historie po přihlášení.
-- [~] Agent Hub: stávající Agenti mají interaktivní 3D síť a přístupné 2D karty původních rolí. Chybí nová sada rolí, oprávnění a nástroje. Akceptace: správa schopností vynucuje oprávnění i na serveru.
+- [~] Agent Hub mapuje původní ID bez jejich přejmenování na Router, Researcher, Architect, Coder, Analyst, Critic a Final Judge. Router plánuje, specialisté běží ve fázích a Final Judge volá modelovou syntézu; pomocný legacy Memory agent zůstává kvůli kompatibilitě. Serverová oprávnění a nástrojová volání zatím chybí. Akceptace: test mapování starých ID, mockované integrační testy pořadí a selhání rolí.
 - [ ] Research Studio: zdroje, dokumenty a analýzy. Akceptace: prokazatelné citace a práce s oprávněnými dokumenty bez neohlášených externích přenosů.
 - [ ] Development Studio: autorizovaný repozitář, izolované změny, testy a PR. Akceptace: auditovatelný průchod ve schváleném rozsahu bez přístupu k produkčním tajemstvím.
 - [~] Projects: pouze ukázkové položky, nikoli uživatelské projekty. Akceptace: oddělený katalog skutečných technologií a import pouze oprávněných GitHub repozitářů.
-- [ ] Approvals: bezpečné schvalování plánů a jejich verzí. Akceptace: změněný plán vyžaduje nové potvrzení, kritické akce samostatné potvrzení.
+- [~] Approvals: bezpečné ukládání a schvalování konkrétních plánů včetně auditu; zatím není aktivní externí executor. Akceptace: změněný plán vyžaduje nové potvrzení, kritické akce samostatné potvrzení a jednorázová autorizace.
 - [~] Memory: lokální a volitelná databázová paměť, import/export, hledání v názvu a obsahu a šifrování citlivého obsahu; databáze filtruje stabilní owner ID. Samostatní uživatelé, ověřená obnova a testy izolace tenantů chybí. Akceptace: testy izolace více účtů, obnovy, exportu a mazání.
 - [~] Settings: stávající nastavení připojení, agentů, rozpočtu a hlasu; chybí účty a správa integrací. Akceptace: serverově vynucená práva a bezpečné relace.
 - [~] Funkce první etapy (hlas, rutiny a analytika) jsou stále dostupné v samostatných obrazovkách; při přechodu na cílovou navigaci se nesmí ztratit.
@@ -33,7 +33,7 @@ Tento soubor zachycuje skutečný stav větve PR #1. **Aplikace není dokončena
 
 ## Agenti, DeepSeek a vývoj
 
-- [~] Stávající server podporuje strukturované výstupy, SSE události a přerušení; modelové odpovědi nejsou tokenově streamované. Stávající role nejsou cílových Router, Researcher, Architect, Coder, Analyst, Critic a Final Judge.
+- [~] Server nyní používá kompatibilní mapování na cílové role Router → paralelní specialisté/fáze → Critic → Final Judge; Final Judge je skutečné volání modelové syntézy. Stále chybí izolovaná oprávnění a skutečné nástrojové volání; SSE neodesílá tokeny průběžně.
 - [ ] Navrhnout a otestovat kompatibilní migraci rolí a pipeline Router → paralelní specialisté → Critic → Final Judge, skutečný tool calling, audit a pevné rozpočty. Akceptace: integrační testy s mockovaným poskytovatelem, přerušením a chybami; živý test pouze po schválení.
 - [ ] Bezpečně implementovat osm vývojových rolí a posoudit Aider, OpenCode a OpenHands bez automatické instalace nebo aktivace. Akceptace: každá změna probíhá ve schválené izolované větvi s testy, PR a kontrolou oprávnění.
 - [ ] Ověřit oficiální aktuální API modely a ceník před použitím; bezpečně nakonfigurovat serverový klíč zvlášť pro Vercel. Akceptace: žádný klíč v klientovi ani logu, testy retry, tool calling, streamu a účtování.

@@ -50,10 +50,10 @@ test("reduced motion presents the accessible agent cards instead of WebGL animat
   await page.goto("/")
   await page.getByRole("button", { name: "Agenti", exact: true }).click()
   await expect(page.getByText(/Omezení pohybu je zapnuto/)).toBeVisible()
-  const card = page.getByRole("button", { name: /Orchestrátor:.*Otevřít detail/ })
+  const card = page.getByRole("button", { name: /Router:.*Otevřít detail/ })
   await expect(card).toBeVisible()
   await card.click()
-  await expect(page.getByRole("dialog", { name: "Orchestrátor" })).toBeVisible()
+  await expect(page.getByRole("dialog", { name: "Router" })).toBeVisible()
 })
 
 test("WebGL node selection and context loss preserve the agent controls", async ({ page }) => {
@@ -66,11 +66,11 @@ test("WebGL node selection and context loss preserve the agent controls", async 
   const bounds = await canvas.boundingBox()
   if (!bounds) throw new Error("3D plátno není viditelné.")
   await canvas.click({ position: { x: bounds.width / 2, y: bounds.height / 2 } })
-  await expect(page.getByRole("dialog", { name: "Orchestrátor" })).toBeVisible()
+  await expect(page.getByRole("dialog", { name: "Router" })).toBeVisible()
   await page.getByRole("button", { name: "Zavřít", exact: true }).click()
   await canvas.evaluate((element) => element.dispatchEvent(new Event("webglcontextlost", { cancelable: true })))
   await expect(status).toContainText("3D není dostupné")
-  await expect(page.getByRole("button", { name: /Orchestrátor:.*Otevřít detail/ })).toBeVisible()
+  await expect(page.getByRole("button", { name: /Router:.*Otevřít detail/ })).toBeVisible()
 })
 
 test("orchestration submission displays the result panel", async ({ page }) => {

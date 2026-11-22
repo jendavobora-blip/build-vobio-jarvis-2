@@ -274,13 +274,13 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
   /* 4. Synthesis */
   if (!signal.aborted) {
     const done = Object.keys(outputs) as AgentId[]
-    for (const id of done) emit({ type: "link", from: id, to: "orchestrator", at: now() })
+    for (const id of done) emit({ type: "link", from: id, to: "final_judge", at: now() })
     emit({
       type: "agent_status",
-      agent: "orchestrator",
+      agent: "final_judge",
       status: "thinking",
       task: "Syntéza výsledků",
-      activity: done.length ? `Spojuji ${done.length} výstup${done.length === 1 ? "" : "y"}` : "Odpovídám přímo",
+      activity: done.length ? `Nezávisle posuzuji ${done.length} výstup${done.length === 1 ? "" : "y"}` : "Kontroluji přímou odpověď",
       at: now(),
     })
     const system = synthesisSystem(body.mode)
@@ -298,17 +298,18 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
         )
         track(synth.usage)
         result = synth.data
-        emit({ type: "agent_status", agent: "orchestrator", status: "done", task: "Syntéza výsledků", activity: "Odpověď připravena", at: now() })
+        emit({ type: "agent_status", agent: "final_judge", status: "done", task: "Finální kontrola", activity: "Odpověď připravena", at: now() })
       } catch (error) {
         const usage = (error as { usage?: Usage }).usage
         if (usage && usage.promptTokens) track(usage)
         const message = error instanceof DeepSeekError ? error.message : "Syntéza selhala."
-        emit({ type: "agent_error", agent: "orchestrator", message, attempts: (error as { attempts?: number }).attempts ?? 1, at: now() })
-        emit({ type: "agent_status", agent: "orchestrator", status: "error", task: "Syntéza výsledků", activity: message, at: now() })
+        emit({ type: "agent_error", agent: "final_judge", message, attempts: (error as { attempts?: number }).attempts ?? 1, at: now() })
+        emit({ type: "agent_status", agent: "final_judge", status: "error", task: "Finální kontrola", activity: message, at: now() })
       }
     } else {
       budgetStopped = true
       emit({ type: "budget_stop", reason: "Syntéza přeskočena – byl by překročen limit požadavku.", at: now() })
+      emit({ type: "agent_status", agent: "final_judge", status: "skipped", task: "Finální kontrola", activity: "Přeskočeno kvůli rozpočtu", at: now() })
     }
 
     if (!result && done.length) {
@@ -319,7 +320,7 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
         nextSteps: [],
         needsApproval: [],
       }
-      emit({ type: "agent_status", agent: "orchestrator", status: "done", task: "Nouzová syntéza", activity: "Zobrazeny dílčí výsledky", at: now() })
+      emit({ type: "agent_status", agent: "final_judge", status: "done", task: "Záložní výstup", activity: "Zobrazeny dílčí výsledky", at: now() })
     }
     if (result) emit({ type: "final", result, at: now() })
     else if (!budgetStopped) emit({ type: "error", message: "Nepodařilo se získat žádný výsledek.", at: now() })

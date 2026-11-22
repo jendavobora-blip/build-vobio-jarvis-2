@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { AGENT_ORDER } from "../lib/jarvis/agents"
+import { AGENT_ORDER, LEGACY_ROLE_TO_TARGET, TARGET_AGENT_ROLES, TARGET_ROLE_TO_AGENT } from "../lib/jarvis/agents"
 import { isLiveAccessEnabled } from "../lib/jarvis/live-access"
 import { filterProjects, PROJECTS } from "../lib/jarvis/projects"
 import { nextGraphicsQuality } from "../lib/jarvis/graphics-quality"
@@ -27,8 +27,14 @@ test("project search and category filters can be combined", () => {
   assert.equal(filterProjects("bez výsledků").length, 0)
 })
 
-test("the visualization includes all seven existing agent roles", () => {
-  assert.equal(AGENT_ORDER.length, 7)
+test("the seven target roles map to legacy-compatible runtime IDs", () => {
+  assert.equal(TARGET_AGENT_ROLES.length, 7)
+  assert.equal(new Set(Object.values(TARGET_ROLE_TO_AGENT)).size, 7)
+  assert.equal(LEGACY_ROLE_TO_TARGET.orchestrator, "router")
+  assert.equal(LEGACY_ROLE_TO_TARGET.planner, "architect")
+  assert.equal(LEGACY_ROLE_TO_TARGET.creator, "coder")
+  assert.equal(LEGACY_ROLE_TO_TARGET.auditor, "critic")
+  assert.equal(AGENT_ORDER.includes("final_judge"), true)
 })
 
 test("graphics quality degrades progressively only on sustained low performance", () => {
