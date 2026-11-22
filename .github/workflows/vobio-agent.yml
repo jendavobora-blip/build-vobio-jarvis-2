@@ -1,1 +1,41 @@
 
+name: VOBIO JARVIS AI programator
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  programator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Gemini programuje
+        uses: google-github-actions/run-gemini-cli@v0
+        env:
+          GEMINI_CLI_TRUST_WORKSPACE: 'true'
+        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          upload_artifacts: false
+          prompt: |
+            You are the senior developer of VOBIO JARVIS by Jan Vobora.
+            Make real code changes in this Next.js/TypeScript repository.
+            PHASE 1: Build a mobile-first Czech design prototype with nine
+            interactive screens (command, agents, orchestration, projects,
+            automation, voice, memory, analytics, settings), seven agent
+            roles (Router, Researcher, Architect, Coder, Analyst, Critic,
+            Final Judge), a demo catalog of 20 projects and an adaptive
+            futuristic 3D-style HUD targeting smooth 60 FPS on iPhone.
+            Preserve existing working backend and authentication.
+            Keep AI integrations disabled until user approves the design.
+            Do not modify workflow files, reveal secrets, enable paid APIs,
+            deploy production or execute trades. Respect reduced motion.
+            Summarize changes in docs/DESIGN_REVIEW.md.
+      - name: Pripravit zmeny ke schvaleni
+        uses: peter-evans/create-pull-request@v8
+        with:
+          branch: ai/vobio-jarvis-design
+          title: 'VOBIO JARVIS - schvaleni designu'
+          body: 'Navrh vytvoreny AI agentem. Pred sloucenim zkontroluj design i kod. Zadny automaticky deploy.'
+          commit-message: 'feat: navrh designu VOBIO JARVIS'
