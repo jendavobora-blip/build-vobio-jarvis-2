@@ -1,7 +1,7 @@
 "use client"
 
 import { AnimatePresence, motion, useReducedMotion } from "motion/react"
-import { useCallback, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { AgentCanvas } from "./agent-canvas"
 import { AgentInspector } from "./agent-inspector"
 import { BottomNav, type JarvisView } from "./bottom-nav"
@@ -47,6 +47,19 @@ export function JarvisApp() {
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
   const voice = useCzechVoice((text) => setInput(text))
+
+  useEffect(() => {
+    if (view === "command" && hint?.includes("ikonu mikrofonu")) {
+      let secondFrame = 0
+      const timeout = window.setTimeout(() => {
+        secondFrame = window.requestAnimationFrame(() => inputRef.current?.focus())
+      }, 120)
+      return () => {
+        window.clearTimeout(timeout)
+        if (secondFrame) window.cancelAnimationFrame(secondFrame)
+      }
+    }
+  }, [hint, view])
 
   const { state: run, startLive, startDemo, cancel } = useJarvisRun({
     onLiveComplete: ({ prompt, answer, usage }) => {
@@ -97,6 +110,7 @@ export function JarvisApp() {
     const started = voice.startListening()
     if (!started) {
       setHint("Klepněte do pole a použijte ikonu mikrofonu na klávesnici iPhonu (diktování).")
+      setView("command")
       window.setTimeout(() => inputRef.current?.focus(), 80)
     } else {
       setHint(null)
@@ -183,6 +197,7 @@ export function JarvisApp() {
                   listening={voice.listening}
                   onMic={handleMic}
                   isDemo={!live}
+                  autoFocus={Boolean(hint?.includes("ikonu mikrofonu"))}
                 />
                 {(voice.error || hint) && <p role="status" className="rounded-2xl bg-secondary/70 p-3 text-sm text-muted-foreground">{voice.error ?? hint}</p>}
                 {voice.listening && <p role="status" className="text-center text-sm text-primary">Poslouchám… mluvte česky</p>}
@@ -206,6 +221,7 @@ export function JarvisApp() {
                 {run.plan.length > 0 && <ol className="space-y-2">{run.plan.map((item, index) => <li key={item.agent} className="glass flex gap-3 rounded-2xl p-3"><span className="font-mono text-primary">{String(index + 1).padStart(2, "0")}</span><div><p className="text-sm font-medium">{AGENTS[item.agent].name}</p><p className="text-xs text-muted-foreground">{item.task}</p></div></li>)}</ol>}
                 <AgentCanvas run={run} onInspect={setInspect} />
                 {running ? <button type="button" onClick={cancel} className="min-h-11 rounded-full bg-destructive/90 px-4 text-sm font-medium text-white">Zastavit běh</button> : <button type="button" onClick={() => startDemo("Ukázková vizualizace týmu agentů", settings.demoLoop)} className="min-h-11 rounded-full border border-warning/50 px-4 text-sm font-medium text-warning">Spustit vizuální DEMO</button>}
+                <ResultPanel run={run} speaking={voice.speaking} canSpeak={voice.synthesisSupported} onSpeak={voice.speak} onStopSpeaking={voice.stopSpeaking} />
               </section>
             )}
 

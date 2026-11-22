@@ -72,3 +72,23 @@ test("WebGL node selection and context loss preserve the agent controls", async 
   await expect(status).toContainText("3D není dostupné")
   await expect(page.getByRole("button", { name: /Orchestrátor:.*Otevřít detail/ })).toBeVisible()
 })
+
+test("orchestration submission displays the result panel", async ({ page }) => {
+  await page.goto("/")
+  await page.getByLabel("Zadání pro JARVISe").fill("Ukázkový průchod výsledkem")
+  await page.getByRole("button", { name: "Odeslat zadání" }).click()
+  await page.getByRole("button", { name: "Tok", exact: true }).click()
+  await expect(page.getByText("Výsledek · DEMO")).toBeVisible({ timeout: 15000 })
+})
+
+test("unsupported voice recognition returns to the text composer", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(window, "SpeechRecognition", { configurable: true, value: undefined })
+    Object.defineProperty(window, "webkitSpeechRecognition", { configurable: true, value: undefined })
+  })
+  await page.goto("/")
+  await page.getByRole("button", { name: "Hlas", exact: true }).click()
+  await page.getByRole("button", { name: "Začít diktovat" }).click()
+  await expect(page.getByLabel("Zadání pro JARVISe")).toBeVisible()
+  await expect(page.getByLabel("Zadání pro JARVISe")).toBeFocused()
+})

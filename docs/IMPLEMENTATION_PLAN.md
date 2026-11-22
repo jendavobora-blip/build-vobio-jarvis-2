@@ -49,5 +49,6 @@ Tento soubor zachycuje skutečný stav větve PR #1. **Aplikace není dokončena
 ## Testování a pokračování
 
 - [~] `pnpm test`, `pnpm typecheck`, `pnpm build`, zamčená instalace a `pnpm test:e2e` jsou k dispozici. E2E pokrývá ochranu Preview, demo, paměť, omezení pohybu a WebGL fallback v emulaci. Ještě chybí lint, širší E2E, skutečné iPhone testy, integrační a bezpečnostní testy, měření spotřeby a FPS na iPhonu.
+- [x] Copilot Code Review: workflow guard detekuje staged i unstaged `.github/workflows` změny; výsledek běhu je viditelný v obrazovce Tok; nepodporovaný hlasový vstup přejde na fokusovaný textový kompozitor. Akceptace: unit test workflow guardu a 2 Playwright scénáře.
 - [ ] Po každé změně zkontrolovat skutečné Preview deploymenty i chování aplikace; stav „build passed“ sám nestačí.
 - Pokračování: zkontrolovat aktuální stav PR #1 a pracovní strom; navázat bez přepsání dat. Nejdříve dokončit bezpečnostní hranice, účty a migrační strategii; všechny implementační fáze průběžně ověřovat. Neaktivovat AI, další placené služby ani produkci bez výslovného souhlasu.

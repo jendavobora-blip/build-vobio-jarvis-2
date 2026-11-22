@@ -5,6 +5,7 @@ import { isLiveAccessEnabled } from "../lib/jarvis/live-access"
 import { filterProjects, PROJECTS } from "../lib/jarvis/projects"
 import { nextGraphicsQuality } from "../lib/jarvis/graphics-quality"
 import { filterMemories } from "../lib/jarvis/memory-filter"
+import { readFileSync } from "node:fs"
 
 test("live AI access stays off unless explicitly enabled by the server", () => {
   assert.equal(isLiveAccessEnabled(undefined), false)
@@ -44,4 +45,10 @@ test("memory search combines title or content with category", () => {
   assert.deepEqual(filterMemories(items, "projects", " HLAS "), [items[0]])
   assert.deepEqual(filterMemories(items, "all", "česky"), [items[1]])
   assert.deepEqual(filterMemories(items, "tasks", ""), [])
+})
+
+test("DeepSeek workflow rejects staged, unstaged, and untracked workflow changes", () => {
+  const workflow = readFileSync(".github/workflows/deepseek-coder.yml", "utf8")
+  assert.match(workflow, /git status --porcelain=v1 -- \.github\/workflows/)
+  assert.doesNotMatch(workflow, /git diff --name-only -- \.github\/workflows/)
 })

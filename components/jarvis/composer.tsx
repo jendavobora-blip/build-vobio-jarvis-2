@@ -12,6 +12,7 @@ interface ComposerProps {
   onSubmit: () => void
   onStop: () => void
   running: boolean
+  autoFocus?: boolean
   mode: WorkMode
   onModeChange: (m: WorkMode) => void
   listening: boolean
@@ -20,7 +21,7 @@ interface ComposerProps {
 }
 
 export const Composer = forwardRef<HTMLTextAreaElement, ComposerProps>(function Composer(
-  { value, onChange, onSubmit, onStop, running, mode, onModeChange, listening, onMic, isDemo },
+  { value, onChange, onSubmit, onStop, running, mode, onModeChange, listening, onMic, isDemo, autoFocus },
   ref,
 ) {
   const canSend = value.trim().length >= 2 && !running
@@ -58,6 +59,7 @@ export const Composer = forwardRef<HTMLTextAreaElement, ComposerProps>(function 
         </label>
         <textarea
           ref={ref}
+          autoFocus={autoFocus}
           id="jarvis-input"
           value={value}
           onChange={(e) => onChange(e.target.value)}
