@@ -6,7 +6,7 @@ Tento soubor zachycuje skutečný stav větve PR #1. **Aplikace není dokončena
 
 - [x] Živá AI volání jsou serverově vypnutá bez `JARVIS_LIVE_ENABLED=true`; Vercel Preview je vypíná i při nastavené hodnotě. Akceptace: test flagu a přímé POST `/api/chat` v Preview bez volání poskytovatele.
 - [ ] Před aktivací živého režimu musí vlastník schválit design **a zabezpečení**; produkce a placené služby se schvalují samostatně.
-- [~] Vlastník je stabilní explicitní UUID `JARVIS_OWNER_ID`, nezávislé na rotovatelných tajemstvích. Relace a AES-GCM mají samostatné secrets; stará paměť se jednorázově zálohuje do `jarvis_memories_owner_backup` a převede na vlastníka. Záloha/obnova a starý šifrovací klíč vyžadují provozní ověření; pozvánky a samostatné účty nejsou implementované. Akceptace: unit test stabilního ID, verzované migrace, owner-scoped SQL a ověřená obnova zálohy.
+- [~] Vlastník je stabilní explicitní UUID `JARVIS_OWNER_ID`, nezávislé na rotovatelných tajemstvích. Relace a AES-GCM mají samostatné secrets; stará paměť se jednorázově zálohuje do `jarvis_memories_owner_backup` a převede na vlastníka. Jsou přidány jednorázové 24h pozvánky, účty s `scrypt` hesly a deaktivace členů; provozní obnova a testy izolace proti skutečné DB ještě chybí. Akceptace: test stabilního ID, migrace, hash hesla, member session revocation, izolace dat a obnova zálohy.
 - [~] Schvalování má obrazovku, owner-scoped neměnný plán a hash, append-only auditní události a dvoufázové potvrzení kritického plánu. Jednorázový `consumeApproval` atomicky přechází pouze z `approved` na `executed`; žádné externí nástroje zatím nejsou připojené. Akceptace: E2E nepřihlášeného odmítnutí, integrační DB test změněného hashe, opakovaného použití a kritických přechodů; externí akce musí spotřebovat schválení před spuštěním.
 - [ ] Nahradit nejlepší možné limity po instancích a neatomické denní účtování centrální atomickou rezervací rozpočtu. Akceptace: paralelní požadavky nepřekročí sjednaný limit v několika instancích; chyby DB vedou k bezpečnému odmítnutí.
 - [ ] Zavést důvěryhodné určení klienta, ochranu proti CSRF a distribuované omezení pokusů o přihlášení; prověřit proxy a původ požadavků. Akceptace: automatizované negativní testy ve více instancích.
@@ -45,7 +45,7 @@ Tento soubor zachycuje skutečný stav větve PR #1. **Aplikace není dokončena
 
 ## Účty, paměť a schvalování
 
-- [ ] Navrhnout vlastníka a pozvánky, autentizaci, oddělení dat po uživatelích, šifrování, historii a nedestruktivní migrace. Současný přístupový kód neposkytuje uživatelskou izolaci. Akceptace: testy izolace tenantů, expirovaných relací, změny klíče, exportu, mazání a obnovení zálohy.
+- [~] Vlastník může vytvářet jednorázové pozvánky a spravovat/deaktivovat členy; člen se přihlásí e-mailem a scrypt heslem. Paměť a schválení používají ID přihlášeného uživatele. Historie úloh, export/mazání, obnovení zálohy a DB integrační testy chybí. Přístupový kód zůstává způsobem přihlášení vlastníka. Akceptace: oddělení mezi dvěma účty, expirace/replay pozvánky, deaktivace okamžitě ruší relaci a data lze bezpečně exportovat/obnovit.
 - [~] Implementovat autonomii C jako serverem vynucený auditovaný stavový automat se svázáním souhlasu s neměnným plánem. Přechody plánu a jednorázové spotřebování jsou serverové; externí akce nejsou implementované. Akceptace: integrační DB test, že žádná externí akce neproběhne bez správného souhlasu a opakované přehrání/změna plánu jsou odmítnuty.
 
 ## Testování a pokračování

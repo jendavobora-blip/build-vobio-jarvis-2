@@ -98,6 +98,24 @@ async function ensureSchema(sql: Sql) {
       event TEXT NOT NULL CHECK (event IN ('created', 'critical_reviewed', 'approved', 'denied', 'execution_authorized')),
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )`
+    await sql`CREATE TABLE IF NOT EXISTS jarvis_accounts (
+      id UUID PRIMARY KEY,
+      owner_id UUID NOT NULL,
+      email TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE (owner_id, email)
+    )`
+    await sql`CREATE TABLE IF NOT EXISTS jarvis_account_invites (
+      id UUID PRIMARY KEY,
+      owner_id UUID NOT NULL,
+      email TEXT NOT NULL,
+      token_hash TEXT NOT NULL UNIQUE,
+      expires_at TIMESTAMPTZ NOT NULL,
+      redeemed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`
   })().catch((error) => {
     schemaReady = undefined
     throw error
@@ -309,4 +327,89 @@ export async function consumeApproval(ownerId: string, id: string, planHash: str
   )
   SELECT consumed.plan_json FROM consumed JOIN logged ON logged.approval_id = consumed.id`) as { plan_json: string }[]
   return rows[0]?.plan_json
+}
+
+export async function createAccountInvite(
+  ownerId: string,
+  email: string,
+  id: string,
+  tokenHash: string,
+): Promise<string> {
+  const sql = await db()
+  if (!sql) throw new Error("Databáze není nastavena.")
+  const rows = (await sql`INSERT INTO jarvis_account_invites (id, owner_id, email, token_hash, expires_at)
+    VALUES (${id}, ${ownerId}, ${email}, ${tokenHash}, now() + interval '24 hours')
+    RETURNING expires_at`) as { expires_at: string | Date }[]
+  if (!rows[0]) throw new Error("Pozvánku nelze vytvořit.")
+  return new Date(rows[0].expires_at).toISOString()
+}
+
+export async function redeemAccountInvite(
+  ownerId: string,
+  email: string,
+  tokenHash: string,
+  userId: string,
+  passwordHash: string,
+): Promise<string | undefined> {
+  const sql = await db()
+  if (!sql) throw new Error("Databáze není nastavena.")
+  const rows = (await sql`WITH invitation AS (
+    UPDATE jarvis_account_invites
+    SET redeemed_at = now()
+    WHERE owner_id = ${ownerId} AND email = ${email} AND token_hash = ${tokenHash}
+      AND redeemed_at IS NULL AND expires_at > now()
+      AND NOT EXISTS (SELECT 1 FROM jarvis_accounts WHERE owner_id = ${ownerId} AND email = ${email})
+    RETURNING owner_id, email
+  ), account AS (
+    INSERT INTO jarvis_accounts (id, owner_id, email, password_hash)
+    SELECT ${userId}::uuid, owner_id, email, ${passwordHash} FROM invitation
+    RETURNING id
+  )
+  SELECT id FROM account`) as { id: string }[]
+  return rows[0]?.id
+}
+
+export async function findAccountForLogin(ownerId: string, email: string): Promise<{
+  id: string
+  password_hash: string
+  active: boolean
+} | undefined> {
+  const sql = await db()
+  if (!sql) throw new Error("Databáze není nastavena.")
+  const rows = (await sql`SELECT id, password_hash, active FROM jarvis_accounts
+    WHERE owner_id = ${ownerId} AND email = ${email} LIMIT 1`) as {
+    id: string
+    password_hash: string
+    active: boolean
+  }[]
+  return rows[0]
+}
+
+export async function isActiveAccount(ownerId: string, userId: string): Promise<boolean> {
+  if (ownerId === userId) return true
+  const sql = await db()
+  if (!sql) return false
+  const rows = (await sql`SELECT id FROM jarvis_accounts
+    WHERE owner_id = ${ownerId} AND id = ${userId} AND active = TRUE LIMIT 1`) as { id: string }[]
+  return rows.length > 0
+}
+
+export async function listAccounts(ownerId: string): Promise<{ id: string; email: string; active: boolean; created_at: string | Date }[]> {
+  const sql = await db()
+  if (!sql) throw new Error("Databáze není nastavena.")
+  return (await sql`SELECT id, email, active, created_at FROM jarvis_accounts
+    WHERE owner_id = ${ownerId} ORDER BY created_at DESC LIMIT 200`) as {
+    id: string
+    email: string
+    active: boolean
+    created_at: string | Date
+  }[]
+}
+
+export async function setAccountActive(ownerId: string, userId: string, active: boolean): Promise<boolean> {
+  const sql = await db()
+  if (!sql) throw new Error("Databáze není nastavena.")
+  const rows = (await sql`UPDATE jarvis_accounts SET active = ${active}
+    WHERE owner_id = ${ownerId} AND id = ${userId} RETURNING id`) as { id: string }[]
+  return rows.length === 1
 }

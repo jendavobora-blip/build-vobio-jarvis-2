@@ -4,6 +4,7 @@ test("preview rejects live AI calls even when the flag and credentials are confi
   const status = await request.get("/api/status")
   expect(status.ok()).toBeTruthy()
   expect((await status.json()).liveEnabled).toBe(false)
+  expect((await status.json()).authConfigured).toBe(false)
   const chat = await request.post("/api/chat", { data: {} })
   expect(chat.status()).toBe(503)
   expect((await chat.json()).demo).toBe(true)
@@ -107,4 +108,16 @@ test("approvals screen is visible but unauthenticated plans cannot be stored", a
   await page.getByRole("button", { name: "Předložit ke schválení" }).click()
   expect((await responsePromise).status()).toBe(401)
   await expect(page.getByText("Nejste přihlášeni.", { exact: true })).toBeVisible()
+})
+
+test("unauthenticated visitors cannot manage accounts or create invitations", async ({ page }) => {
+  await page.goto("/")
+  const accounts = await page.request.get("/api/accounts")
+  expect(accounts.status()).toBe(403)
+
+  const invitation = await page.request.post("/api/accounts/invitations", {
+    headers: { Origin: new URL(page.url()).origin },
+    data: { email: "member@example.test" },
+  })
+  expect(invitation.status()).toBe(403)
 })

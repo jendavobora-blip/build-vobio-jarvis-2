@@ -1,10 +1,23 @@
 import "server-only"
-import { createHash, createHmac, timingSafeEqual, randomBytes, createCipheriv, createDecipheriv } from "node:crypto"
+import { createHash, createHmac, timingSafeEqual, randomBytes, createCipheriv, createDecipheriv, scrypt as scryptCallback } from "node:crypto"
 import { cookies } from "next/headers"
 import { serverConfig } from "./config"
 
 export const SESSION_COOKIE = "jarvis_session"
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 14
+const scrypt = (password: string, salt: Buffer) =>
+  new Promise<Buffer>((resolve, reject) => {
+    scryptCallback(password, salt, 64, (error, derived) => {
+      if (error) reject(error)
+      else resolve(derived)
+    })
+  })
+
+export interface AuthenticatedUser {
+  id: string
+  ownerId: string
+  role: "owner" | "member"
+}
 
 function secretMaterial(): string | undefined {
   return serverConfig.sessionSecret
@@ -36,12 +49,21 @@ export function verifyAccessCode(input: string): boolean {
   return safeEqual(input, code)
 }
 
-export function createSessionToken(): { token: string; maxAge: number } | undefined {
+export function createSessionToken(
+  userId = ownerId(),
+  role: AuthenticatedUser["role"] = "owner",
+): { token: string; maxAge: number } | undefined {
   const key = signingKey()
-  const subject = ownerId()
-  if (!key || !subject) return undefined
+  const tenantOwnerId = ownerId()
+  if (!key || !tenantOwnerId || !userId || (role === "owner" && userId !== tenantOwnerId)) return undefined
   const payload = Buffer.from(
-    JSON.stringify({ exp: Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS, sub: subject, n: randomBytes(8).toString("hex") }),
+    JSON.stringify({
+      exp: Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS,
+      sub: userId,
+      owner: tenantOwnerId,
+      role,
+      n: randomBytes(8).toString("hex"),
+    }),
   ).toString("base64url")
   return { token: `${payload}.${sign(payload, key)}`, maxAge: SESSION_TTL_SECONDS }
 }
@@ -50,22 +72,35 @@ export function ownerId(): string | undefined {
   return serverConfig.ownerId
 }
 
-async function sessionOwnerId(): Promise<string | undefined> {
+async function sessionUser(): Promise<AuthenticatedUser | undefined> {
   const store = await cookies()
   const token = store.get(SESSION_COOKIE)?.value
   if (!isValidSessionToken(token)) return undefined
   const payload = token?.split(".")[0]
   if (!payload) return undefined
+  let data: { sub?: string; owner?: string; role?: AuthenticatedUser["role"] }
   try {
-    const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { sub?: string }
-    return data.sub === ownerId() ? data.sub : undefined
+    data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"))
   } catch {
     return undefined
   }
+  const tenantOwnerId = ownerId()
+  if (!tenantOwnerId || data.owner !== tenantOwnerId || !data.sub) return undefined
+  if (data.role === "owner") {
+    return data.sub === tenantOwnerId ? { id: data.sub, ownerId: tenantOwnerId, role: "owner" } : undefined
+  }
+  if (data.role !== "member") return undefined
+  const { isActiveAccount } = await import("./db")
+  if (!(await isActiveAccount(tenantOwnerId, data.sub))) return undefined
+  return { id: data.sub, ownerId: tenantOwnerId, role: "member" }
+}
+
+export async function authenticatedUser(): Promise<AuthenticatedUser | undefined> {
+  return sessionUser()
 }
 
 export async function authenticatedOwnerId(): Promise<string | undefined> {
-  return sessionOwnerId()
+  return (await sessionUser())?.id
 }
 
 export function isValidSessionToken(token: string | undefined): boolean {
@@ -83,7 +118,35 @@ export function isValidSessionToken(token: string | undefined): boolean {
 }
 
 export async function isAuthenticated(): Promise<boolean> {
-  return Boolean(await sessionOwnerId())
+  return Boolean(await sessionUser())
+}
+
+export async function hashAccountPassword(password: string): Promise<string> {
+  const salt = randomBytes(16)
+  const derived = await scrypt(password, salt)
+  return `scrypt-v1:${salt.toString("base64url")}:${derived.toString("base64url")}`
+}
+
+export async function verifyAccountPassword(password: string, encoded: string): Promise<boolean> {
+  const [version, saltText, expectedText] = encoded.split(":")
+  if (version !== "scrypt-v1" || !saltText || !expectedText) return false
+  try {
+    const expected = Buffer.from(expectedText, "base64url")
+    const actual = await scrypt(password, Buffer.from(saltText, "base64url"))
+    return expected.length === actual.length && timingSafeEqual(expected, actual)
+  } catch {
+    return false
+  }
+}
+
+export async function authenticateAccount(email: string, password: string): Promise<string | undefined> {
+  const tenantOwnerId = ownerId()
+  if (!tenantOwnerId) return undefined
+  const { findAccountForLogin } = await import("./db")
+  const account = await findAccountForLogin(tenantOwnerId, email)
+  const dummyHash = `scrypt-v1:${Buffer.alloc(16).toString("base64url")}:${Buffer.alloc(64).toString("base64url")}`
+  const validPassword = await verifyAccountPassword(password, account?.password_hash ?? dummyHash)
+  return account?.active && validPassword ? account.id : undefined
 }
 
 export function encryptText(plain: string): string {
