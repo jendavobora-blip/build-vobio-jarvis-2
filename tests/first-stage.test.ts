@@ -8,6 +8,7 @@ test("live AI access stays off unless explicitly enabled by the server", () => {
   assert.equal(isLiveAccessEnabled(undefined), false)
   assert.equal(isLiveAccessEnabled("false"), false)
   assert.equal(isLiveAccessEnabled(" true "), true)
+  assert.equal(isLiveAccessEnabled("true", "preview"), false)
 })
 
 test("the prototype provides 20 uniquely identified projects", () => {

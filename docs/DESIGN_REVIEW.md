@@ -8,7 +8,7 @@ HUD používá stávající CSS/SVG a transformace místo WebGL. Animace respekt
 
 ## Bezpečnost a aktivace
 
-- Živá volání API jsou serverově blokována, dokud není `JARVIS_LIVE_ENABLED=true`; v repozitáři ani workflow se tato proměnná nenastavuje.
+- Živá volání API jsou na Vercel Preview vždy blokována; jinde vyžadují `JARVIS_LIVE_ENABLED=true`. V repozitáři ani workflow se tato proměnná nenastavuje.
 - `DEEPSEEK_API_KEY` zůstává serverovým GitHub Secret a jeho hodnota se do kódu ani výstupů nekopíruje.
 - Přihlašovací cookie nyní používá `SameSite=Lax`.
 - Povolovací seznam build skriptů pnpm připouští pouze ověřený `esbuild@0.28.2`; `strictDepBuilds` zůstává aktivní.

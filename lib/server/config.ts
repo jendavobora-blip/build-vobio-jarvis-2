@@ -21,7 +21,7 @@ export const serverConfig = {
     return process.env.DATABASE_URL?.trim() || undefined
   },
   get liveEnabled(): boolean {
-    return isLiveAccessEnabled(process.env.JARVIS_LIVE_ENABLED)
+    return isLiveAccessEnabled(process.env.JARVIS_LIVE_ENABLED, process.env.VERCEL_ENV)
   },
   limits: {
     get maxRequestUsd() {
