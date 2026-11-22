@@ -1,0 +1,104 @@
+name: VOBIO JARVIS - DeepSeek programator
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Co ma DeepSeek naprogramovat?"
+        required: true
+        type: string
+        default: >-
+          Faze 1: Uprav VOBIO JARVIS na moderni ceske mobilni velitelske centrum
+          s 9 interaktivnimi obrazovkami, sedmi rolemi agentu, katalogem 20 projektu
+          a plynulym holografickym HUD. Zachovej funkcni backend a prihlasovani.
+          Neaktivuj AI backend, placene sluzby ani produkcni nasazeni.
+          Priprav funkcni design k memu schvaleni.
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: vobio-deepseek-coder
+  cancel-in-progress: false
+
+jobs:
+  coder:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Overit dostupnost API klice
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          if [ -z "$DEEPSEEK_API_KEY" ]; then
+            echo "Chybi repository secret DEEPSEEK_API_KEY" >&2
+            exit 1
+          fi
+
+      - name: Stahnout projekt
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Nainstalovat open-source programatora Aider
+        run: python -m pip install --disable-pip-version-check --no-cache-dir aider-chat
+
+      - name: DeepSeek upravi zdrojovy kod
+        env:
+          OPENAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OPENAI_API_BASE: https://api.deepseek.com
+          TASK: ${{ inputs.task }}
+        run: |
+          cat > /tmp/agent-instructions.txt <<'INSTRUCTIONS'
+          Jsi senior programator projektu VOBIO JARVIS, autor Jan Vobora.
+          Proved skutecne upravy kodu v tomto Next.js/TypeScript repozitari.
+          Zacni designem, nikdy nezapinej placene sluzby, AI backend, ani produkcni nasazeni.
+          Zachovej fungujici autentizaci, API, historii a existujici data.
+          Mobilni rozhrani musi fungovat na iPhonu, v cestine a s pristupnosti.
+          Neprepisuj .github/workflows ani jakekoliv tajne klice. Nevypisuj environment variables.
+          Role AI agentu: Router, Researcher, Architect, Coder, Analyst, Critic, Final Judge.
+          Devet obrazovek: Velin, Agenti, Orchestrace, Projekty, Automatizace,
+          Hlas, Pamet, Analytika, Nastaveni. Katalog 20 projektu.
+          3D HUD ma byt adaptivni, podporovat prefers-reduced-motion a cilit na 60 FPS.
+          Zmeny priprav jako design/prototyp ke schvaleni, ne produkcni release.
+          Pokud muzes, vytvor docs/DESIGN_REVIEW.md s popisem skutecne dokoncenych zmen.
+          Pouzivej existujici knihovny a neprovadej obchodovani ani financni transakce.
+          INSTRUCTIONS
+          printf '\nUZIVATELUV UKOL:\n%s\n' "$TASK" >> /tmp/agent-instructions.txt
+          aider \
+            --model openai/deepseek-flash \
+            --edit-format whole \
+            --message-file /tmp/agent-instructions.txt \
+            --yes --no-auto-commits --no-stream
+
+      - name: Overit zmeny
+        run: git diff --check
+
+      - name: Vytvorit Pull Request ke schvaleni
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ai/deepseek-jarvis-design
+          commit-message: "feat: design prototype by DeepSeek agent"
+          title: "VOBIO JARVIS: navrh zmen od DeepSeek"
+          body: |
+            AI agent pripravil navrh zmen. Zkontroluj prosim design, zmeny
+            a bezpecnost pred kliknutim Merge. Produkce se nenasazuje automaticky.
+          add-paths: |
+            app
+            components
+            hooks
+            lib
+            public
+            docs
+            package.json
+            pnpm-lock.yaml
+            next.config.mjs
+            tsconfig.json
+            README.md
