@@ -15,4 +15,5 @@
 - Neprezentujte demonstrace, lokální přepínače nebo nedostupné integrace jako funkční služby. FPS uvádějte jen jako reálně naměřenou hodnotu s podmínkami měření.
 - Při úpravě závislostí zachovejte zamčený lockfile a přísné povolování build skriptů v `pnpm-workspace.yaml`. Nepovolujte další skripty bez ověření.
 - Před předáním spusťte alespoň `pnpm install --frozen-lockfile`, `pnpm test`, `pnpm typecheck` a `pnpm build`; podle změn přidejte integrační a mobilní testy.
+- E2E testy: po buildu nainstalujte prohlížeč přes `pnpm exec playwright install chromium` a spusťte `pnpm test:e2e`. Lokálně lze použít existující Chromium pomocí `PLAYWRIGHT_CHROMIUM_EXECUTABLE`. Emulace iPhonu nenahrazuje test na skutečném zařízení.
 - Stav, omezení, zbývající práci a akceptační testy udržujte v `docs/IMPLEMENTATION_PLAN.md`. Netvrďte, že práce pokračuje po skončení relace.
