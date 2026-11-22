@@ -3,3 +3,8 @@ pmOnFail: ignore
 minimumReleaseAgeExclude:
   - '@next/*'
   - next
+
+strictDepBuilds: true
+
+allowBuilds:
+  esbuild@0.28.2: true

@@ -11,6 +11,7 @@ HUD používá stávající CSS/SVG a transformace místo WebGL. Animace respekt
 - Živá volání API jsou serverově blokována, dokud není `JARVIS_LIVE_ENABLED=true`; v repozitáři ani workflow se tato proměnná nenastavuje.
 - `DEEPSEEK_API_KEY` zůstává serverovým GitHub Secret a jeho hodnota se do kódu ani výstupů nekopíruje.
 - Přihlašovací cookie nyní používá `SameSite=Lax`.
+- Povolovací seznam build skriptů pnpm připouští pouze ověřený `esbuild@0.28.2`; `strictDepBuilds` zůstává aktivní.
 - Manuální DeepSeek workflow nepřetrvává přihlašovací údaje checkoutu a odmítne změny workflow souborů.
 - Automatizace jsou pouze lokální přepínače prototypu. Nespouštějí plánované úlohy ani externí akce.
 
