@@ -282,6 +282,7 @@ test("PostgreSQL rate limits and daily budget reservations are atomic under conc
   )
   const recovered = await reserveDailyBudget(owner, randomUUID(), 0.01, 0.05)
   assert.equal(recovered, true)
+  assert.ok(Math.abs((await getDailyUsage()).costUsd - 0.03) < 1e-9)
   assert.equal(
     (await pool.query("SELECT count(*)::int AS count FROM jarvis_budget_reservations WHERE status = 'reserved' AND created_at < now() - interval '1 hour'")).rows[0]?.count,
     0,
@@ -295,7 +296,7 @@ test("PostgreSQL settlement preserves actual cost and tokens when audit persiste
   const auditFailure = Object.assign(new Error("simulated audit database outage"), {
     usage: { costUsd: 0.0075, promptTokens: 140, completionTokens: 35 },
   })
-  const usage = preserveUsageForSettlement({ costUsd: 0, tokens: 0 }, auditFailure)
+  const usage = preserveUsageForSettlement({ costUsd: 0, tokens: 0, usageKnown: false }, auditFailure)
 
   await settleBudgetUsage(reservationId, usage, settleDailyBudget)
   const after = await getDailyUsage()
@@ -304,4 +305,19 @@ test("PostgreSQL settlement preserves actual cost and tokens when audit persiste
   assert.equal(after.tokens - before.tokens, 175)
   const reservation = await pool.query("SELECT status FROM jarvis_budget_reservations WHERE id = $1", [reservationId])
   assert.equal(reservation.rows[0]?.status, "settled")
+})
+
+test("PostgreSQL unknown usage conservatively accounts the reservation instead of releasing it free", async () => {
+  const before = await getDailyUsage()
+  const reservationId = randomUUID()
+  assert.equal(await reserveDailyBudget(owner, reservationId, 0.02, 1), true)
+  await settleDailyBudget(reservationId, 0, 0, false)
+  const reservation = await pool.query(
+    "SELECT status, reserved_usd, usage_uncertain FROM jarvis_budget_reservations WHERE id = $1",
+    [reservationId],
+  )
+  assert.equal(reservation.rows[0]?.status, "settled")
+  assert.equal(Number(reservation.rows[0]?.reserved_usd), 0.02)
+  assert.equal(reservation.rows[0]?.usage_uncertain, true)
+  assert.ok(Math.abs((await getDailyUsage()).costUsd - before.costUsd - 0.02) < 1e-9)
 })

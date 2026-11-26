@@ -123,17 +123,20 @@ export async function POST(request: Request) {
         }
       }, 15_000)
 
-      let spent = { costUsd: 0, tokens: 0 }
+      let spent = { costUsd: 0, tokens: 0, usageKnown: false }
+      let providerUncertain = false
       let auditRunId: string | undefined
       try {
         const total = await runOrchestration({
           body: parsed,
           emit: (event) => {
             if (event.type === "run_start") auditRunId = event.runId
+            if (event.type === "agent_error") providerUncertain = true
             if (event.type === "usage") {
               spent = {
                 costUsd: event.total.costUsd,
                 tokens: event.total.promptTokens + event.total.completionTokens,
+                usageKnown: true,
               }
             }
             emit(event)
@@ -142,9 +145,10 @@ export async function POST(request: Request) {
           limits,
           audit: (event) => recordOrchestrationAuditEvent(user.ownerId, user.id, event),
         })
-        spent = { costUsd: total.costUsd, tokens: total.promptTokens + total.completionTokens }
+        spent = { costUsd: total.costUsd, tokens: total.promptTokens + total.completionTokens, usageKnown: !providerUncertain }
       } catch (error) {
         spent = preserveUsageForSettlement(spent, error)
+        if (!(error instanceof OrchestrationAuditError) || providerUncertain) spent.usageKnown = false
         if (auditRunId) {
           try {
             const failureReason: OrchestrationFailureReason = abort.signal.aborted

@@ -89,6 +89,7 @@ async function ensureSchema(sql: Sql) {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       settled_at TIMESTAMPTZ
     )`
+    await sql`ALTER TABLE jarvis_budget_reservations ADD COLUMN IF NOT EXISTS usage_uncertain BOOLEAN NOT NULL DEFAULT false`
     await sql`CREATE TABLE IF NOT EXISTS jarvis_rate_limits (
       key TEXT NOT NULL,
       window_start TIMESTAMPTZ NOT NULL,
@@ -283,14 +284,15 @@ export async function reserveDailyBudget(
   const key = today()
   await sql`WITH expired AS (
     UPDATE jarvis_budget_reservations
-    SET status = 'settled', settled_at = now()
+    SET status = 'settled', settled_at = now(), usage_uncertain = true
     WHERE day = ${key} AND status = 'reserved' AND created_at < now() - interval '1 hour'
     RETURNING day, reserved_usd
   ), released AS (
     SELECT day, sum(reserved_usd) AS amount FROM expired GROUP BY day
   )
   UPDATE jarvis_usage usage
-  SET reserved_usd = GREATEST(0, usage.reserved_usd - released.amount)
+  SET reserved_usd = GREATEST(0, usage.reserved_usd - released.amount),
+      cost_usd = usage.cost_usd + released.amount
   FROM released
   WHERE usage.day = released.day`
   const rows = (await sql`WITH budget AS (
@@ -309,7 +311,12 @@ export async function reserveDailyBudget(
   return rows.length === 1
 }
 
-export async function settleDailyBudget(reservationId: string, costUsd: number, tokens: number): Promise<void> {
+export async function settleDailyBudget(
+  reservationId: string,
+  costUsd: number,
+  tokens: number,
+  usageKnown = true,
+): Promise<void> {
   if (!Number.isFinite(costUsd) || costUsd < 0 || !Number.isFinite(tokens) || tokens < 0) {
     throw new Error("Neplatné vyúčtování rozpočtu.")
   }
@@ -318,13 +325,14 @@ export async function settleDailyBudget(reservationId: string, costUsd: number, 
   await sql.transaction((tx) => [
     tx`WITH settled AS (
       UPDATE jarvis_budget_reservations
-      SET status = 'settled', settled_at = now()
+      SET status = 'settled', settled_at = now(), usage_uncertain = NOT ${usageKnown}
       WHERE id = ${reservationId}::uuid AND status = 'reserved'
       RETURNING day, reserved_usd
     )
     UPDATE jarvis_usage usage
     SET reserved_usd = GREATEST(0, usage.reserved_usd - settled.reserved_usd),
-        cost_usd = usage.cost_usd + ${costUsd},
+        cost_usd = usage.cost_usd + CASE WHEN ${usageKnown} THEN ${costUsd}
+          ELSE GREATEST(settled.reserved_usd, ${costUsd}) END,
         tokens = usage.tokens + ${Math.trunc(tokens)},
         requests = usage.requests + 1
     FROM settled

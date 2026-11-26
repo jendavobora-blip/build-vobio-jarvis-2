@@ -541,6 +541,7 @@ test("tool failure audit failure propagates without misreporting tool success", 
         if (event.event === "tool_failed") throw new Error("simulated failed-tool audit outage")
       },
     })
+
   } catch (error) {
     failure = error
   }
@@ -549,6 +550,25 @@ test("tool failure audit failure propagates without misreporting tool success", 
   assert.match(failure.message, /simulated failed-tool audit outage/)
   assert.ok("usage" in failure)
   assert.ok(!audit.some((event) => event.event === "tool_succeeded" || event.event === "run_completed"))
+})
+
+test("provider transport failures are not retried without reliable usage", async () => {
+  process.env.DEEPSEEK_API_KEY = "integration-test-placeholder"
+  let calls = 0
+  globalThis.fetch = async () => {
+    calls += 1
+    return new Response("unavailable", { status: 503 })
+  }
+  const { callChat } = await import("../lib/server/deepseek")
+  await assert.rejects(callChat({
+    model: "deepseek-flash",
+    messages: [{ role: "user", content: "test" }],
+    maxTokens: 50,
+    reasoning: false,
+    jsonMode: false,
+    signal: new AbortController().signal,
+  }))
+  assert.equal(calls, 1)
 })
 
 test("terminal status selection preserves abort, budget, tool, model, and no-result precedence", async () => {

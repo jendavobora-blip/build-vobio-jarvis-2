@@ -653,7 +653,9 @@ export async function runOrchestration({ body, emit, signal, limits, audit }: Ru
 
   for (const p of phases) {
     if (signal.aborted) break
-    await Promise.all(p.members.map((m) => runSpecialist(m.agent, m.task, p.upstream)))
+    const results = await Promise.allSettled(p.members.map((m) => runSpecialist(m.agent, m.task, p.upstream)))
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected")
+    if (failed) throw failed.reason
   }
 
   /* 4. Synthesis */
