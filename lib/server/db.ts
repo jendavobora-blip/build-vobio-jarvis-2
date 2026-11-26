@@ -1,6 +1,6 @@
 import "server-only"
 import { neon } from "@neondatabase/serverless"
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { serverConfig } from "./config"
 import { decryptText, encryptText, ownerId } from "./auth"
 import type { AgentId, MemoryItem } from "@/lib/jarvis/types"
@@ -130,14 +130,22 @@ async function ensureSchema(sql: Sql) {
     )`
     await sql`CREATE TABLE IF NOT EXISTS jarvis_orchestration_audit (
       id UUID PRIMARY KEY,
+      event_key TEXT NOT NULL,
       owner_id TEXT NOT NULL,
       actor_id TEXT NOT NULL,
       run_id TEXT NOT NULL,
       agent_id TEXT NOT NULL CHECK (agent_id IN ('orchestrator', 'researcher', 'memory', 'planner', 'analyst', 'creator', 'auditor', 'final_judge')),
       event TEXT NOT NULL CHECK (event IN ('run_started', 'run_completed', 'run_failed', 'tool_requested', 'tool_denied', 'tool_succeeded', 'tool_failed')),
       tool_name TEXT,
+      failure_reason TEXT CHECK (failure_reason IS NULL OR failure_reason IN ('aborted', 'budget_exceeded', 'model_error', 'tool_error', 'no_result', 'audit_error', 'internal_error')),
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )`
+    await sql`ALTER TABLE jarvis_orchestration_audit ADD COLUMN IF NOT EXISTS event_key TEXT`
+    await sql`ALTER TABLE jarvis_orchestration_audit ADD COLUMN IF NOT EXISTS failure_reason TEXT`
+    await sql`UPDATE jarvis_orchestration_audit SET event_key = id::text WHERE event_key IS NULL`
+    await sql`ALTER TABLE jarvis_orchestration_audit ALTER COLUMN event_key SET NOT NULL`
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS jarvis_orchestration_audit_event_key
+      ON jarvis_orchestration_audit (event_key)`
     await sql`CREATE INDEX IF NOT EXISTS jarvis_orchestration_audit_owner_actor_created
       ON jarvis_orchestration_audit (owner_id, actor_id, created_at DESC)`
     await sql`CREATE TABLE IF NOT EXISTS jarvis_accounts (
@@ -442,16 +450,34 @@ export async function listApprovalAudit(ownerId: string): Promise<{ approval_id:
 }
 
 export type OrchestrationAuditEvent =
-  | { runId: string; agentId: AgentId; event: "run_started" | "run_completed" | "run_failed" }
+  | { runId: string; agentId: AgentId; event: "run_started" | "run_completed" }
+  | { runId: string; agentId: AgentId; event: "run_failed"; failureReason: OrchestrationFailureReason }
   | { runId: string; agentId: AgentId; event: "tool_requested" | "tool_denied" | "tool_succeeded" | "tool_failed"; toolName: string }
+
+export type OrchestrationFailureReason =
+  | "aborted"
+  | "budget_exceeded"
+  | "model_error"
+  | "tool_error"
+  | "no_result"
+  | "audit_error"
+  | "internal_error"
 
 export interface OrchestrationAuditRow {
   run_id: string
   agent_id: AgentId
   event: OrchestrationAuditEvent["event"]
   tool_name: string | null
+  failure_reason: OrchestrationFailureReason | null
   actor_id: string
   created_at: string | Date
+}
+
+export class OrchestrationAuditError extends Error {
+  constructor() {
+    super("Uložení auditní události orchestrace selhalo.")
+    this.name = "OrchestrationAuditError"
+  }
 }
 
 export async function recordOrchestrationAuditEvent(
@@ -460,14 +486,58 @@ export async function recordOrchestrationAuditEvent(
   event: OrchestrationAuditEvent,
 ): Promise<void> {
   if (!ownerId || !actorId || !event.runId) throw new Error("Chybí tenant, uživatel nebo identifikátor orchestrace.")
+  const isRunEvent = event.event === "run_started" || event.event === "run_completed" || event.event === "run_failed"
   const toolName = "toolName" in event ? event.toolName.trim().slice(0, 128) : null
   if ("toolName" in event && !toolName) throw new Error("Auditní událost nástroje musí obsahovat název.")
   if (toolName && /[\u0000-\u001f\u007f]/.test(toolName)) throw new Error("Název nástroje obsahuje nepovolené znaky.")
-  const sql = await db()
-  if (!sql) throw new Error("Audit orchestrace vyžaduje sdílenou databázi.")
-  await sql`INSERT INTO jarvis_orchestration_audit
-    (id, owner_id, actor_id, run_id, agent_id, event, tool_name)
-    VALUES (${randomUUID()}::uuid, ${ownerId}, ${actorId}, ${event.runId}, ${event.agentId}, ${event.event}, ${toolName})`
+  if (isRunEvent && "toolName" in event) throw new Error("Událost orchestrace nesmí obsahovat název nástroje.")
+  const failureReason = event.event === "run_failed" ? event.failureReason : null
+  const isTerminal = event.event === "run_completed" || event.event === "run_failed"
+  const eventKey = createHash("sha256")
+    .update(JSON.stringify([
+      ownerId,
+      actorId,
+      event.runId,
+      event.agentId,
+      isTerminal ? "run_terminal" : event.event,
+      toolName ?? "",
+    ]))
+    .digest("hex")
+  let sql: Sql | undefined
+  try {
+    sql = await db()
+  } catch {
+    throw new OrchestrationAuditError()
+  }
+  if (!sql) throw new OrchestrationAuditError()
+  try {
+    if (isTerminal) {
+      const existing = (await sql`SELECT event FROM jarvis_orchestration_audit
+        WHERE owner_id = ${ownerId} AND actor_id = ${actorId} AND run_id = ${event.runId}
+          AND event IN ('run_completed', 'run_failed')
+        LIMIT 1`) as { event: string }[]
+      if (existing[0]) {
+        if (existing[0].event !== event.event) throw new OrchestrationAuditError()
+        return
+      }
+    }
+    const inserted = (await sql`INSERT INTO jarvis_orchestration_audit
+      (id, event_key, owner_id, actor_id, run_id, agent_id, event, tool_name, failure_reason)
+      VALUES (${randomUUID()}::uuid, ${eventKey}, ${ownerId}, ${actorId}, ${event.runId},
+        ${event.agentId}, ${event.event}, ${toolName}, ${failureReason})
+      ON CONFLICT (event_key) DO NOTHING
+      RETURNING id`) as { id: string }[]
+    if (!inserted.length && isTerminal) {
+      const existing = (await sql`SELECT event FROM jarvis_orchestration_audit
+        WHERE owner_id = ${ownerId} AND actor_id = ${actorId} AND run_id = ${event.runId}
+          AND event IN ('run_completed', 'run_failed')
+        LIMIT 1`) as { event: string }[]
+      if (existing[0]?.event !== event.event) throw new OrchestrationAuditError()
+    }
+  } catch (error) {
+    if (error instanceof OrchestrationAuditError) throw error
+    throw new OrchestrationAuditError()
+  }
 }
 
 export async function listOrchestrationAudit(
@@ -481,12 +551,12 @@ export async function listOrchestrationAudit(
   const sql = await db()
   if (!sql) throw new Error("Audit orchestrace vyžaduje sdílenou databázi.")
   if (actorId) {
-    return (await sql`SELECT run_id, agent_id, event, tool_name, actor_id, created_at
+    return (await sql`SELECT run_id, agent_id, event, tool_name, failure_reason, actor_id, created_at
       FROM jarvis_orchestration_audit
       WHERE owner_id = ${ownerId} AND actor_id = ${actorId}
       ORDER BY created_at DESC LIMIT ${limit}`) as OrchestrationAuditRow[]
   }
-  return (await sql`SELECT run_id, agent_id, event, tool_name, actor_id, created_at
+  return (await sql`SELECT run_id, agent_id, event, tool_name, failure_reason, actor_id, created_at
     FROM jarvis_orchestration_audit
     WHERE owner_id = ${ownerId}
     ORDER BY created_at DESC LIMIT ${limit}`) as OrchestrationAuditRow[]

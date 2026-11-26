@@ -201,6 +201,60 @@ test("PostgreSQL orchestration audit is append-only, tenant-scoped, and omits pr
   assert.equal((await listOrchestrationAudit("5c5d6e7f-8091-4cad-9e2f-3a4b5c6d7e8f")).length, 1)
 })
 
+test("PostgreSQL orchestration audit deduplicates concurrent events and preserves one terminal status", async () => {
+  const runId = randomUUID()
+  await recordOrchestrationAuditEvent(owner, member, {
+    runId,
+    agentId: "orchestrator",
+    event: "run_started",
+  })
+
+  await Promise.all(
+    Array.from({ length: 24 }, () =>
+      recordOrchestrationAuditEvent(owner, member, {
+        runId,
+        agentId: "orchestrator",
+        event: "run_failed",
+        failureReason: "budget_exceeded",
+      }),
+    ),
+  )
+
+  const rows = await pool.query(
+    "SELECT event, failure_reason FROM jarvis_orchestration_audit WHERE owner_id = $1 AND actor_id = $2 AND run_id = $3",
+    [owner, member, runId],
+  )
+  assert.equal(rows.rows.filter((row) => row.event === "run_failed").length, 1)
+  assert.equal(rows.rows.find((row) => row.event === "run_failed")?.failure_reason, "budget_exceeded")
+  await assert.rejects(
+    recordOrchestrationAuditEvent(owner, member, {
+      runId,
+      agentId: "orchestrator",
+      event: "run_completed",
+    }),
+    /Uložení auditní události/,
+  )
+})
+
+test("PostgreSQL audit writer reports database failures instead of succeeding silently", async () => {
+  const unavailable = (async () => {
+    throw new Error("simulated PostgreSQL outage")
+  }) as unknown as Parameters<typeof installDatabaseAdapterForTesting>[0]
+  installDatabaseAdapterForTesting(unavailable)
+  try {
+    await assert.rejects(
+      recordOrchestrationAuditEvent(owner, member, {
+        runId: randomUUID(),
+        agentId: "orchestrator",
+        event: "run_started",
+      }),
+      /Uložení auditní události orchestrace selhalo/,
+    )
+  } finally {
+    installDatabaseAdapterForTesting(adapter as unknown as Parameters<typeof installDatabaseAdapterForTesting>[0])
+  }
+})
+
 test("PostgreSQL rate limits and daily budget reservations are atomic under concurrency", async () => {
   const rateResults = await Promise.all(
     Array.from({ length: 20 }, () => consumeSharedRateLimit("same-test-client", 5, 60_000)),

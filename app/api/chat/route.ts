@@ -3,7 +3,13 @@ import { randomUUID } from "node:crypto"
 import { authenticatedUser } from "@/lib/server/auth"
 import { isLiveAvailable, serverConfig } from "@/lib/server/config"
 import { clientIp, rateLimit } from "@/lib/server/rate-limit"
-import { recordOrchestrationAuditEvent, reserveDailyBudget, settleDailyBudget } from "@/lib/server/db"
+import {
+  OrchestrationAuditError,
+  recordOrchestrationAuditEvent,
+  reserveDailyBudget,
+  settleDailyBudget,
+  type OrchestrationFailureReason,
+} from "@/lib/server/db"
 import { runOrchestration } from "@/lib/server/orchestrator"
 import { DeepSeekError } from "@/lib/server/deepseek"
 import { SPECIALISTS } from "@/lib/jarvis/agents"
@@ -140,17 +146,28 @@ export async function POST(request: Request) {
         }
         if (auditRunId) {
           try {
+            const failureReason: OrchestrationFailureReason = abort.signal.aborted
+              ? "aborted"
+              : error instanceof DeepSeekError
+                ? "model_error"
+                : error instanceof OrchestrationAuditError
+                  ? "audit_error"
+                  : "internal_error"
             await recordOrchestrationAuditEvent(user.ownerId, user.id, {
               runId: auditRunId,
               agentId: "orchestrator",
               event: "run_failed",
+              failureReason,
             })
           } catch (auditError) {
             console.error("[jarvis] orchestration failure audit failed", auditError instanceof Error ? auditError.message : auditError)
           }
         }
-        const message =
-          error instanceof DeepSeekError ? error.message : "Při zpracování došlo k neočekávané chybě. Zkuste to znovu."
+        const message = abort.signal.aborted
+          ? "Požadavek byl zrušen."
+          : error instanceof DeepSeekError
+            ? error.message
+            : "Při zpracování došlo k neočekávané chybě. Zkuste to znovu."
         if (!(error instanceof DeepSeekError)) {
           console.error("[jarvis] orchestration failed", error instanceof Error ? error.message : error)
         }

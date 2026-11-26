@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { afterEach, test } from "node:test"
-import type { ChatRequestBody, RunEvent } from "../lib/jarvis/types"
+import type { ChatRequestBody, RunEvent, Usage } from "../lib/jarvis/types"
 import { isToolAllowed } from "../lib/server/tool-permissions"
 import type { OrchestrationAuditEvent } from "../lib/server/db"
 
@@ -135,6 +135,11 @@ function errorEvents(events: RunEvent[]) {
   return events.filter((event) => event.type === "agent_error") as unknown as { agent?: string; message?: string }[]
 }
 
+function failureReason(events: OrchestrationAuditEvent[]) {
+  const terminal = events.at(-1)
+  return terminal?.event === "run_failed" ? terminal.failureReason : undefined
+}
+
 const orionMemory: ChatRequestBody["memories"] = [
   { id: "m1", category: "projects", title: "Projekt Orion", content: "Orion je interní projekt zaměřený na orchestraci agentů." },
 ]
@@ -174,7 +179,11 @@ test("search_memory tool round succeeds and records invocation and outcome", asy
   assert.ok(statuses.some((status) => status.agent === "memory" && status.activity === "Tool dokončen: 1 výsledků"))
   assert.equal(errorEvents(events).filter((event) => event.agent === "memory").length, 0)
   assert.deepEqual(audit.map((event) => event.event), ["run_started", "tool_requested", "tool_succeeded", "run_completed"])
-  assert.equal(JSON.stringify(audit).includes(orionMemory[0]!.content), false)
+  const serializedAudit = JSON.stringify(audit)
+  assert.equal(serializedAudit.includes(orionMemory[0]!.content), false)
+  assert.equal(serializedAudit.includes("Co víš o projektu Orion?"), false)
+  assert.equal(serializedAudit.includes("integration-test-placeholder"), false)
+  assert.equal(serializedAudit.includes('"query":"orion"'), false)
   assert.ok(events.some((event) => event.type === "final"))
   assert.ok(result.promptTokens > 0)
 })
@@ -198,7 +207,9 @@ test("unknown tool name is rejected visibly and not reported as success", async 
 
   const memoryErrors = errorEvents(events).filter((event) => event.agent === "memory")
   assert.ok(memoryErrors.some((event) => String(event.message).includes("Nepovolený") || String(event.message).includes("Neznámý")))
-  assert.deepEqual(audit.map((event) => event.event), ["run_started", "tool_requested", "tool_denied", "run_completed"])
+  assert.deepEqual(audit.map((event) => event.event), ["run_started", "tool_requested", "tool_denied", "run_failed"])
+  assert.equal(failureReason(audit), "tool_error")
+  assert.ok(!events.some((event) => event.type === "final"))
   const statuses = statusEvents(events)
   assert.ok(!statuses.some((status) => status.activity?.startsWith("Tool dokončen")))
 })
@@ -209,16 +220,20 @@ test("invalid tool arguments are rejected visibly", async () => {
 
   const { runOrchestration } = await import("../lib/server/orchestrator")
   const events: RunEvent[] = []
+  const audit: OrchestrationAuditEvent[] = []
   await runOrchestration({
     body: makeBody(orionMemory),
     emit: (event) => events.push(event),
     signal: new AbortController().signal,
     limits: { maxTokens: 500_000, maxCostUsd: 5 },
-    audit: ignoreAudit,
+    audit: async (event) => {
+      audit.push(event)
+    },
   })
 
   const memoryErrors = errorEvents(events).filter((event) => event.agent === "memory")
   assert.ok(memoryErrors.some((event) => String(event.message).includes("JSON")))
+  assert.equal(failureReason(audit), "tool_error")
   const statuses = statusEvents(events)
   assert.ok(!statuses.some((status) => status.activity?.startsWith("Tool dokončen")))
 })
@@ -229,12 +244,15 @@ test("tool calls are capped to a single round even if the model keeps requesting
 
   const { runOrchestration } = await import("../lib/server/orchestrator")
   const events: RunEvent[] = []
+  const audit: OrchestrationAuditEvent[] = []
   await runOrchestration({
     body: makeBody(orionMemory),
     emit: (event) => events.push(event),
     signal: new AbortController().signal,
     limits: { maxTokens: 500_000, maxCostUsd: 5 },
-    audit: ignoreAudit,
+    audit: async (event) => {
+      audit.push(event)
+    },
   })
 
   const executions = statusEvents(events).filter((status) => status.activity?.startsWith("search_memory:"))
@@ -245,6 +263,7 @@ test("tool calls are capped to a single round even if the model keeps requesting
   // 1 first round + up to MAX_ATTEMPTS for the final JSON call; never an extra tool execution round.
   assert.ok(toolCalls.length <= 3)
   assert.ok(errorEvents(events).some((event) => event.agent === "memory"))
+  assert.equal(failureReason(audit), "model_error")
 })
 
 test("budget exhaustion skips the tool visibly without calling the model", async () => {
@@ -253,17 +272,21 @@ test("budget exhaustion skips the tool visibly without calling the model", async
 
   const { runOrchestration } = await import("../lib/server/orchestrator")
   const events: RunEvent[] = []
+  const audit: OrchestrationAuditEvent[] = []
   await runOrchestration({
     body: makeBody(orionMemory),
     emit: (event) => events.push(event),
     signal: new AbortController().signal,
     limits: { maxTokens: 200, maxCostUsd: 0.0005 },
-    audit: ignoreAudit,
+    audit: async (event) => {
+      audit.push(event)
+    },
   })
 
   const budgetStops = events.filter((event) => event.type === "budget_stop") as unknown as { reason?: string }[]
   assert.ok(budgetStops.some((stop) => String(stop.reason).includes("search_memory")))
   assert.equal(calls.filter((call) => call.system.includes("search_memory")).length, 0)
+  assert.equal(failureReason(audit), "budget_exceeded")
 })
 
 test("memory agent disabled never starts search_memory", async () => {
@@ -307,6 +330,12 @@ test("multiple tool_calls are rejected and none is executed", async () => {
         usage: usage(40, 12),
       })
     }
+    if (system.includes("Role: FINAL JUDGE")) {
+      return jsonResponse({
+        choices: [{ message: { content: JSON.stringify({ answer: "Finální odpověď.", nextSteps: [], needsApproval: [] }) }, finish_reason: "stop" }],
+        usage: usage(30, 10),
+      })
+    }
     return jsonResponse({
       choices: [{ message: { content: JSON.stringify({ rationale: "Test", agents: [] }) }, finish_reason: "stop" }],
       usage: usage(30, 10),
@@ -314,16 +343,20 @@ test("multiple tool_calls are rejected and none is executed", async () => {
   }
   const { runOrchestration } = await import("../lib/server/orchestrator")
   const events: RunEvent[] = []
+  const audit: OrchestrationAuditEvent[] = []
   await runOrchestration({
     body: makeBody(orionMemory),
     emit: (event) => events.push(event),
     signal: new AbortController().signal,
     limits: { maxTokens: 500_000, maxCostUsd: 5 },
-    audit: ignoreAudit,
+    audit: async (event) => {
+      audit.push(event)
+    },
   })
   assert.equal(toolCallsSeen, 1)
   assert.ok(errorEvents(events).some((event) => event.message?.includes("nejvýše jedno")))
   assert.ok(!statusEvents(events).some((status) => status.activity?.startsWith("search_memory:")))
+  assert.equal(failureReason(audit), "tool_error")
 })
 
 test("API error is emitted explicitly and never converted into an empty success", async () => {
@@ -343,16 +376,111 @@ test("API error is emitted explicitly and never converted into an empty success"
   }
   const { runOrchestration } = await import("../lib/server/orchestrator")
   const events: RunEvent[] = []
+  const audit: OrchestrationAuditEvent[] = []
   await runOrchestration({
     body: makeBody(orionMemory),
     emit: (event) => events.push(event),
     signal: new AbortController().signal,
     limits: { maxTokens: 500_000, maxCostUsd: 5 },
-    audit: ignoreAudit,
+    audit: async (event) => {
+      audit.push(event)
+    },
   })
   assert.ok(calls >= 1)
   assert.ok(errorEvents(events).some((event) => event.agent === "memory"))
   assert.ok(statusEvents(events).some((status) => status.agent === "memory" && status.status === "error"))
+  assert.equal(failureReason(audit), "model_error")
+  assert.ok(!audit.some((event) => event.event === "run_completed"))
+  assert.ok(!events.some((event) => event.type === "final"))
+})
+
+test("final model failure records run_failed and never emits a fallback as final", async () => {
+  process.env.DEEPSEEK_API_KEY = "integration-test-placeholder"
+  globalThis.fetch = async (_input, init) => {
+    const request = JSON.parse(String(init?.body)) as { messages: { role: string; content: string }[] }
+    const system = request.messages.find((message) => message.role === "system")?.content ?? ""
+    if (system.includes("Role: FINAL JUDGE")) return new Response("provider unavailable", { status: 502 })
+    if (system.includes("search_memory")) {
+      return jsonResponse({
+        choices: [{ message: { content: JSON.stringify({ context: "" }) }, finish_reason: "stop" }],
+        usage: usage(20, 5),
+      })
+    }
+    return jsonResponse({
+      choices: [{ message: { content: JSON.stringify({ rationale: "Test", agents: [{ id: "memory", task: "Zkontroluj paměť." }] }) }, finish_reason: "stop" }],
+      usage: usage(20, 5),
+    })
+  }
+  const { runOrchestration } = await import("../lib/server/orchestrator")
+  const events: RunEvent[] = []
+  const audit: OrchestrationAuditEvent[] = []
+  await runOrchestration({
+    body: makeBody(orionMemory),
+    emit: (event) => events.push(event),
+    signal: new AbortController().signal,
+    limits: { maxTokens: 500_000, maxCostUsd: 5 },
+    audit: async (event) => {
+      audit.push(event)
+    },
+  })
+
+  assert.equal(failureReason(audit), "model_error")
+  assert.ok(!audit.some((event) => event.event === "run_completed"))
+  assert.ok(!events.some((event) => event.type === "final"))
+  assert.ok(events.some((event) => event.type === "error"))
+})
+
+test("aborted orchestration receives one terminal failure audit and performs no model calls", async () => {
+  process.env.DEEPSEEK_API_KEY = "integration-test-placeholder"
+  let calls = 0
+  globalThis.fetch = async () => {
+    calls += 1
+    return jsonResponse({})
+  }
+  const { runOrchestration } = await import("../lib/server/orchestrator")
+  const controller = new AbortController()
+  controller.abort()
+  const audit: OrchestrationAuditEvent[] = []
+  await runOrchestration({
+    body: makeBody(orionMemory),
+    emit: () => {},
+    signal: controller.signal,
+    limits: { maxTokens: 500_000, maxCostUsd: 5 },
+    audit: async (event) => {
+      audit.push(event)
+    },
+  })
+  assert.deepEqual(audit.map((event) => event.event), ["run_started", "run_failed"])
+  assert.equal(failureReason(audit), "aborted")
+  assert.equal(calls, 0)
+})
+
+test("audit persistence failure prevents a success-shaped final response", async () => {
+  process.env.DEEPSEEK_API_KEY = "integration-test-placeholder"
+  installFetch()
+  const { runOrchestration } = await import("../lib/server/orchestrator")
+  const events: RunEvent[] = []
+  let failure: unknown
+  try {
+    await runOrchestration({
+      body: makeBody([]),
+      emit: (event) => events.push(event),
+      signal: new AbortController().signal,
+      limits: { maxTokens: 500_000, maxCostUsd: 5 },
+      audit: async (event) => {
+        if (event.event === "run_completed") throw new Error("simulated database outage")
+      },
+    })
+  } catch (error) {
+    failure = error
+  }
+  assert.ok(failure instanceof Error)
+  assert.match(failure.message, /simulated database outage/)
+  assert.ok("usage" in failure)
+  const failedUsage = (failure as Error & { usage?: Usage }).usage
+  assert.ok(failedUsage)
+  assert.ok(failedUsage.promptTokens > 0)
+  assert.ok(!events.some((event) => event.type === "final" || event.type === "done"))
 })
 
 test("concurrent specialist reservations cannot exceed a shared token budget", async () => {
