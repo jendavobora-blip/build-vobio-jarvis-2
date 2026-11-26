@@ -18,6 +18,7 @@ afterEach(() => {
 interface RecordedCall {
   system: string
   hasToolMessage: boolean
+  requestBody: string
 }
 
 interface ToolBehavior {
@@ -61,7 +62,7 @@ function installFetch(behavior: ToolBehavior = {}): RecordedCall[] {
     const request = JSON.parse(String(init?.body)) as { messages: { role: string; content: string }[] }
     const system = request.messages.find((message) => message.role === "system")?.content ?? ""
     const hasToolMessage = request.messages.some((message) => message.role === "tool")
-    calls.push({ system, hasToolMessage })
+    calls.push({ system, hasToolMessage, requestBody: String(init?.body) })
 
     if (system.includes("search_memory")) {
       const wantsTool = hasToolMessage ? behavior.finalCall === "tool" : behavior.firstCall !== "none"
@@ -254,6 +255,7 @@ test("memory agent disabled never starts search_memory", async () => {
   })
   assert.equal(calls.filter((call) => call.system.includes("search_memory")).length, 0)
   assert.ok(statusEvents(events).some((status) => status.agent === "memory" && status.status === "skipped"))
+  assert.ok(calls.every((call) => !call.requestBody.includes(orionMemory[0].content)))
 })
 
 test("multiple tool_calls are rejected and none is executed", async () => {

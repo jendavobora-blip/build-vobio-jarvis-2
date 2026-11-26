@@ -164,7 +164,8 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
   emit({ type: "run_start", runId, model: body.model, depth: body.depth, at: now() })
 
   /* 1. Memory retrieval (local, free) */
-  const matches = retrieveMemories(body.message, body.memories, body.mode)
+  const memoryEnabled = body.enabledAgents.includes("memory")
+  const matches = memoryEnabled ? retrieveMemories(body.message, body.memories, body.mode) : []
   emit({
     type: "memory_context",
     matched: matches.map((m) => ({ id: m.item.id, title: m.item.title, score: m.score })),
@@ -177,7 +178,7 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
   /* 1b. Single fixed read-only tool round over the request's own memories (deepseek-flash). */
   const toolModel: ModelId = "deepseek-flash"
   const runMemoryTool = async (): Promise<string> => {
-    if (!body.enabledAgents.includes("memory")) {
+    if (!memoryEnabled) {
       emit({
         type: "agent_status",
         agent: "memory",
