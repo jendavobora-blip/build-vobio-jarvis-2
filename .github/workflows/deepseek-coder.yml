@@ -103,6 +103,9 @@ jobs:
             --read AGENTS.md \
             --no-auto-commits \
             --no-gitignore \
+            --input-history-file /dev/null \
+            --chat-history-file /dev/null \
+            --map-tokens 0 \
             --no-suggest-shell-commands \
             --no-auto-test \
             --no-auto-lint \
