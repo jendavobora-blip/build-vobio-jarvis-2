@@ -20,13 +20,14 @@ const STATUS_LABEL: Record<AgentRuntime["status"], string> = {
 }
 
 const HOME: Record<AgentId, { x: number; y: number }> = {
-  orchestrator: { x: 46, y: 90 },
-  researcher: { x: 6, y: 90 },
-  memory: { x: 20, y: 94 },
-  planner: { x: 33, y: 89 },
-  analyst: { x: 60, y: 94 },
-  creator: { x: 72, y: 89 },
-  auditor: { x: 84, y: 94 },
+  orchestrator: { x: 20, y: 10 },
+  researcher: { x: 70, y: 10 },
+  memory: { x: 20, y: 34 },
+  planner: { x: 70, y: 34 },
+  analyst: { x: 20, y: 58 },
+  creator: { x: 70, y: 58 },
+  auditor: { x: 20, y: 82 },
+  final_judge: { x: 70, y: 82 },
 }
 
 function cursorTarget(id: AgentId, rt: AgentRuntime): { x: number; y: number } {

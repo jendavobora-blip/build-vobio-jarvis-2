@@ -6,8 +6,9 @@ export type AgentId =
   | "analyst"
   | "creator"
   | "auditor"
+  | "final_judge"
 
-export type SpecialistId = Exclude<AgentId, "orchestrator">
+export type SpecialistId = Exclude<AgentId, "orchestrator" | "final_judge">
 
 export type WorkMode = "universal" | "investments" | "business"
 export type AnalysisDepth = "quick" | "full"
@@ -83,8 +84,10 @@ export type RunEvent =
 
 export interface StatusResponse {
   deepseekConfigured: boolean
+  liveEnabled: boolean
   authConfigured: boolean
   authenticated: boolean
+  userRole?: "owner" | "member"
   databaseConfigured: boolean
   limits: { maxRequestUsd: number; maxRequestTokens: number; dailyBudgetUsd: number; runsPer10Min: number }
   usageToday: { costUsd: number; tokens: number; requests: number; shared: boolean } | null

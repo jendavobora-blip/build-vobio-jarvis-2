@@ -9,6 +9,8 @@
 
 # production
 /build
+/test-results/
+/playwright-report/
 
 # debug
 npm-debug.log*

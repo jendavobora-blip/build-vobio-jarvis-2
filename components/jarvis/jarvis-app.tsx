@@ -1,7 +1,7 @@
 "use client"
 
 import { AnimatePresence, motion, useReducedMotion } from "motion/react"
-import { useCallback, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { AgentCanvas } from "./agent-canvas"
 import { AgentInspector } from "./agent-inspector"
 import { BottomNav, type JarvisView } from "./bottom-nav"
@@ -10,6 +10,16 @@ import { HudCore } from "./hud-core"
 import { MemoryDrawer } from "./memory-drawer"
 import { ResultPanel } from "./result-panel"
 import { SettingsDrawer } from "./settings-drawer"
+import { SpatialVisualization } from "./spatial-visualization"
+import {
+  AnalyticsScreen,
+  ApprovalsScreen,
+  AutomationsScreen,
+  MemoryScreen,
+  ProjectsScreen,
+  SettingsScreen,
+  VoiceScreen,
+} from "./operational-screens"
 import { canRunLive, useJarvisSettings, useLifetimeUsage, useServerStatus } from "@/hooks/use-jarvis-settings"
 import { useJarvisRun } from "@/hooks/use-jarvis-run"
 import { useMemories } from "@/hooks/use-memories"
@@ -17,6 +27,7 @@ import { useCzechVoice } from "@/hooks/use-czech-voice"
 import { AGENTS } from "@/lib/jarvis/agents"
 import { formatUsd } from "@/lib/jarvis/pricing"
 import type { AgentId } from "@/lib/jarvis/types"
+import type { JarvisProject } from "@/lib/jarvis/projects"
 import { cn } from "@/lib/utils"
 
 export function JarvisApp() {
@@ -28,7 +39,7 @@ export function JarvisApp() {
   const cloudAvailable = Boolean(status.data?.databaseConfigured && status.data.authenticated)
   const memory = useMemories(cloudAvailable)
 
-  const [view, setView] = useState<JarvisView>("core")
+  const [view, setView] = useState<JarvisView>("command")
   const [input, setInput] = useState("")
   const [memoryOpen, setMemoryOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -37,6 +48,19 @@ export function JarvisApp() {
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
   const voice = useCzechVoice((text) => setInput(text))
+
+  useEffect(() => {
+    if (view === "command" && hint?.includes("ikonu mikrofonu")) {
+      let secondFrame = 0
+      const timeout = window.setTimeout(() => {
+        secondFrame = window.requestAnimationFrame(() => inputRef.current?.focus())
+      }, 120)
+      return () => {
+        window.clearTimeout(timeout)
+        if (secondFrame) window.cancelAnimationFrame(secondFrame)
+      }
+    }
+  }, [hint, view])
 
   const { state: run, startLive, startDemo, cancel } = useJarvisRun({
     onLiveComplete: ({ prompt, answer, usage }) => {
@@ -58,7 +82,7 @@ export function JarvisApp() {
     const message = input.trim()
     if (message.length < 2) return
     voice.stopListening()
-    setView("canvas")
+    setView("orchestration")
     if (!live) {
       startDemo(message, settings.demoLoop)
       return
@@ -84,10 +108,10 @@ export function JarvisApp() {
       voice.stopListening()
       return
     }
-    setView("core")
     const started = voice.startListening()
     if (!started) {
       setHint("Klepněte do pole a použijte ikonu mikrofonu na klávesnici iPhonu (diktování).")
+      setView("command")
       window.setTimeout(() => inputRef.current?.focus(), 80)
     } else {
       setHint(null)
@@ -132,11 +156,13 @@ export function JarvisApp() {
         </div>
       </header>
 
-      <main className="relative z-10 mx-auto max-w-2xl px-4 pb-36">
+      <main className="relative z-10 mx-auto max-w-3xl px-4 pb-36">
         {!live && status.data && (
           <DemoNotice
             reason={
-              !status.data.deepseekConfigured
+              !status.data.liveEnabled
+                ? "Živý AI backend čeká na schválení designu."
+                : !status.data.deepseekConfigured
                 ? "DeepSeek API klíč není na serveru nastaven."
                 : !status.data.authConfigured
                   ? "Chybí přístupový kód JARVIS_ACCESS_CODE."
@@ -149,105 +175,69 @@ export function JarvisApp() {
         )}
 
         <AnimatePresence mode="wait" initial={false}>
-          {view === "core" ? (
-            <motion.div
-              key="core"
-              initial={{ opacity: 0, y: reduce ? 0 : 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: reduce ? 0 : 0.2 }}
-              className="space-y-5"
-            >
-              <HudCore active={running} label={coreLabel} sublabel={coreSub} className="mt-2" />
-              <Composer
-                ref={inputRef}
-                value={input}
-                onChange={setInput}
-                onSubmit={submit}
-                onStop={cancel}
-                running={running}
-                mode={settings.mode}
-                onModeChange={(m) => setSettings((s) => ({ ...s, mode: m }))}
-                listening={voice.listening}
-                onMic={handleMic}
-                isDemo={!live}
-              />
-              {(voice.error || hint) && (
-                <p role="status" className="rounded-2xl bg-secondary/70 p-3 text-sm text-muted-foreground">
-                  {voice.error ?? hint}
-                </p>
-              )}
-              {voice.listening && (
-                <p role="status" className="text-center text-sm text-primary">
-                  Poslouchám… mluvte česky
-                </p>
-              )}
-              <ResultPanel
-                run={run}
-                speaking={voice.speaking}
-                canSpeak={voice.synthesisSupported}
-                onSpeak={voice.speak}
-                onStopSpeaking={voice.stopSpeaking}
-              />
-              <QuickStats lifetimeCost={lifetime.costUsd} runs={lifetime.runs} memoryCount={memory.items.length} live={live} />
-            </motion.div>
-          ) : (
-            <motion.div
-              key="canvas"
-              initial={{ opacity: 0, y: reduce ? 0 : 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: reduce ? 0 : 0.2 }}
-              className="space-y-4"
-            >
-              <div className="flex items-end justify-between gap-3 pt-2">
-                <div className="min-w-0">
-                  <h2 className="text-xs font-semibold uppercase tracking-[0.2em] text-primary">Agentické plátno</h2>
-                  <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">
-                    {run.rationale || (run.phase === "idle" ? "Zadejte úkol ve Velínu nebo spusťte ukázku." : "Orchestrátor plánuje…")}
-                  </p>
-                </div>
-                {running ? (
-                  <button type="button" onClick={cancel} className="min-h-11 shrink-0 rounded-full bg-destructive/90 px-4 text-sm font-medium text-white">
-                    Zastavit
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => startDemo("Ukázková vizualizace týmu agentů", settings.demoLoop)}
-                    className="min-h-11 shrink-0 rounded-full border border-warning/50 px-4 text-sm font-medium text-warning"
-                  >
-                    Ukázka (DEMO)
-                  </button>
-                )}
-              </div>
-              <AgentCanvas run={run} onInspect={setInspect} />
-              {run.memoryMatches.length > 0 && (
-                <p className="text-xs text-muted-foreground">
-                  Kontext z paměti: {run.memoryMatches.map((m) => m.title).join(" · ")}
-                </p>
-              )}
-              <ResultPanel
-                run={run}
-                speaking={voice.speaking}
-                canSpeak={voice.synthesisSupported}
-                onSpeak={voice.speak}
-                onStopSpeaking={voice.stopSpeaking}
-              />
-            </motion.div>
-          )}
+          <motion.div
+            key={view}
+            initial={{ opacity: 0, y: reduce ? 0 : 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: reduce ? 0 : 0.2 }}
+            className="space-y-5"
+          >
+            {view === "command" && (
+              <>
+                <HudCore active={running} label={coreLabel} sublabel={coreSub} className="mt-2" />
+                <Composer
+                  ref={inputRef}
+                  value={input}
+                  onChange={setInput}
+                  onSubmit={submit}
+                  onStop={cancel}
+                  running={running}
+                  mode={settings.mode}
+                  onModeChange={(m) => setSettings((s) => ({ ...s, mode: m }))}
+                  listening={voice.listening}
+                  onMic={handleMic}
+                  isDemo={!live}
+                  autoFocus={Boolean(hint?.includes("ikonu mikrofonu"))}
+                />
+                {(voice.error || hint) && <p role="status" className="rounded-2xl bg-secondary/70 p-3 text-sm text-muted-foreground">{voice.error ?? hint}</p>}
+                {voice.listening && <p role="status" className="text-center text-sm text-primary">Poslouchám… mluvte česky</p>}
+                <ResultPanel run={run} speaking={voice.speaking} canSpeak={voice.synthesisSupported} onSpeak={voice.speak} onStopSpeaking={voice.stopSpeaking} />
+                <QuickStats lifetimeCost={lifetime.costUsd} runs={lifetime.runs} memoryCount={memory.items.length} live={live} />
+              </>
+            )}
+
+            {view === "agents" && (
+              <section className="space-y-4">
+                <ScreenHeading eyebrow="Tým agentů" title="Sedm cílových rolí" detail="Router, Researcher, Architect, Coder, Analyst, Critic a Final Judge. Pomocná paměť zůstává kvůli kompatibilitě." />
+                <SpatialVisualization kind="agents" run={run} onInspect={setInspect} />
+                <AgentCanvas run={run} onInspect={setInspect} />
+                <ResultPanel run={run} speaking={voice.speaking} canSpeak={voice.synthesisSupported} onSpeak={voice.speak} onStopSpeaking={voice.stopSpeaking} />
+              </section>
+            )}
+
+            {view === "orchestration" && (
+              <section className="space-y-4">
+                <ScreenHeading eyebrow="Orchestrace" title="Tok práce v reálném čase" detail={run.rationale || "Spusťte ukázku z Velínu a sledujte koordinaci sedmi rolí."} />
+                {run.plan.length > 0 && <ol className="space-y-2">{run.plan.map((item, index) => <li key={item.agent} className="glass flex gap-3 rounded-2xl p-3"><span className="font-mono text-primary">{String(index + 1).padStart(2, "0")}</span><div><p className="text-sm font-medium">{AGENTS[item.agent].name}</p><p className="text-xs text-muted-foreground">{item.task}</p></div></li>)}</ol>}
+                <AgentCanvas run={run} onInspect={setInspect} />
+                {running ? <button type="button" onClick={cancel} className="min-h-11 rounded-full bg-destructive/90 px-4 text-sm font-medium text-white">Zastavit běh</button> : <button type="button" onClick={() => startDemo("Ukázková vizualizace týmu agentů", settings.demoLoop)} className="min-h-11 rounded-full border border-warning/50 px-4 text-sm font-medium text-warning">Spustit vizuální DEMO</button>}
+                <ResultPanel run={run} speaking={voice.speaking} canSpeak={voice.synthesisSupported} onSpeak={voice.speak} onStopSpeaking={voice.stopSpeaking} />
+              </section>
+            )}
+
+            {view === "projects" && <ProjectsScreen onUse={(project: JarvisProject) => { setInput(project.prompt); setView("command"); window.setTimeout(() => inputRef.current?.focus(), 0) }} />}
+            {view === "automations" && <AutomationsScreen />}
+            {view === "voice" && <VoiceScreen listening={voice.listening} speaking={voice.speaking} supported={voice.recognitionSupported} canSpeak={voice.synthesisSupported} error={voice.error ?? hint} onMic={handleMic} onSpeak={() => voice.speak("Dobrý den, JARVIS je připraven. Hlasové ovládání se spouští pouze po vašem klepnutí.")} onStop={voice.stopSpeaking} />}
+            {view === "approvals" && <ApprovalsScreen />}
+            {view === "memory" && <MemoryScreen items={memory.items} cloudAvailable={cloudAvailable} onOpen={() => setMemoryOpen(true)} />}
+            {view === "analytics" && <AnalyticsScreen lifetime={lifetime} status={status.data} run={run} />}
+            {view === "settings" && <SettingsScreen settings={settings} liveEnabled={Boolean(status.data?.liveEnabled)} onOpen={() => setSettingsOpen(true)} />}
+          </motion.div>
         </AnimatePresence>
       </main>
 
-      <BottomNav
-        view={view}
-        onView={setView}
-        onMemory={() => setMemoryOpen(true)}
-        onSettings={() => setSettingsOpen(true)}
-        onMic={handleMic}
-        listening={voice.listening}
-        running={running}
-      />
+      <BottomNav view={view} onView={setView} running={running} />
 
       <AgentInspector agentId={inspect} run={run} onClose={() => setInspect(null)} />
       <MemoryDrawer
@@ -273,13 +263,17 @@ export function JarvisApp() {
         onResetLifetime={() => setLifetime({ runs: 0, promptTokens: 0, completionTokens: 0, costUsd: 0 })}
         onPlayDemo={() => {
           setSettingsOpen(false)
-          setView("canvas")
+          setView("orchestration")
           startDemo("Ukázková vizualizace týmu agentů", settings.demoLoop)
         }}
         voiceSupport={{ recognition: voice.recognitionSupported, synthesis: voice.synthesisSupported }}
       />
     </div>
   )
+}
+
+function ScreenHeading({ eyebrow, title, detail }: { eyebrow: string; title: string; detail: string }) {
+  return <header className="space-y-1"><p className="font-mono text-[10px] uppercase tracking-[0.3em] text-primary">{eyebrow}</p><h2 className="text-xl font-semibold tracking-tight">{title}</h2><p className="text-sm leading-relaxed text-muted-foreground">{detail}</p></header>
 }
 
 function DemoNotice({ reason, onOpen }: { reason: string; onOpen: () => void }) {

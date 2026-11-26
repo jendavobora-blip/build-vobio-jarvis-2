@@ -1,13 +1,18 @@
 import "server-only"
+import { createHash } from "node:crypto"
+import { consumeSharedRateLimit, isDatabaseConfigured } from "./db"
 
-/**
- * In-memory sliding window. On Vercel this is per function instance, so it is a
- * best-effort guard; the daily spend ledger in the database (when configured) is
- * the authoritative cross-instance cost limit.
- */
 const buckets = new Map<string, number[]>()
 
-export function rateLimit(key: string, limit: number, windowMs: number): { ok: boolean; retryAfterSec: number } {
+export async function rateLimit(key: string, limit: number, windowMs: number): Promise<{ ok: boolean; retryAfterSec: number }> {
+  if (isDatabaseConfigured() || process.env.NODE_ENV === "production") {
+    const digest = createHash("sha256").update(key).digest("base64url")
+    return consumeSharedRateLimit(digest, limit, windowMs)
+  }
+  return localRateLimit(key, limit, windowMs)
+}
+
+function localRateLimit(key: string, limit: number, windowMs: number): { ok: boolean; retryAfterSec: number } {
   const now = Date.now()
   const hits = (buckets.get(key) ?? []).filter((t) => now - t < windowMs)
   if (hits.length >= limit) {
@@ -23,5 +28,6 @@ export function rateLimit(key: string, limit: number, windowMs: number): { ok: b
 }
 
 export function clientIp(headers: Headers): string {
-  return headers.get("x-forwarded-for")?.split(",")[0]?.trim() || headers.get("x-real-ip") || "unknown"
+  const trusted = headers.get("x-real-ip")?.trim()
+  return trusted && /^[\da-f:.]+$/i.test(trusted) ? trusted : "unknown"
 }

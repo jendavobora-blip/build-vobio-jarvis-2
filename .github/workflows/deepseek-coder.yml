@@ -39,7 +39,7 @@ jobs:
       - name: Stahnout projekt
         uses: actions/checkout@v4
         with:
-          persist-credentials: true
+          persist-credentials: false
 
       - name: Python
         uses: actions/setup-python@v5
@@ -79,6 +79,14 @@ jobs:
 
       - name: Overit zmeny
         run: git diff --check
+
+      - name: Zakazat zmeny workflow
+        run: |
+          set -euo pipefail
+          if [ -n "$(git status --porcelain=v1 -- .github/workflows)" ]; then
+            echo "AI navrh nesmi menit GitHub Actions workflow." >&2
+            exit 1
+          fi
 
       - name: Vytvorit Pull Request ke schvaleni
         uses: peter-evans/create-pull-request@v8

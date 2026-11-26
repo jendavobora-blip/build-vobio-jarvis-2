@@ -1,6 +1,7 @@
 import { z } from "zod"
-import { isAuthenticated } from "@/lib/server/auth"
+import { authenticatedOwnerId } from "@/lib/server/auth"
 import { deleteMemory, isDatabaseConfigured, listMemories, upsertMemory } from "@/lib/server/db"
+import { hasValidRequestOrigin, rateLimitResponse } from "@/lib/server/request-security"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -19,7 +20,8 @@ async function guard(): Promise<Response | null> {
   if (!isDatabaseConfigured()) {
     return Response.json({ error: "Synchronizovaná paměť vyžaduje DATABASE_URL." }, { status: 501 })
   }
-  if (!(await isAuthenticated())) return Response.json({ error: "Nejste přihlášeni." }, { status: 401 })
+  const ownerId = await authenticatedOwnerId()
+  if (!ownerId) return Response.json({ error: "Nejste přihlášeni." }, { status: 401 })
   return null
 }
 
@@ -28,23 +30,32 @@ function failure(error: unknown) {
   return Response.json({ error: "Databáze je nedostupná. Zkuste to později." }, { status: 502 })
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   const blocked = await guard()
   if (blocked) return blocked
+  const ownerId = await authenticatedOwnerId()
+  if (!ownerId) return Response.json({ error: "Nejste přihlášeni." }, { status: 401 })
   try {
-    return Response.json({ items: await listMemories() }, { headers: { "Cache-Control": "no-store" } })
+    const limited = await rateLimitResponse(request, `memory-read:${ownerId}`, 60, 60_000)
+    if (limited) return limited
+    return Response.json({ items: await listMemories(ownerId) }, { headers: { "Cache-Control": "no-store" } })
   } catch (error) {
     return failure(error)
   }
 }
 
 export async function PUT(request: Request) {
+  if (!hasValidRequestOrigin(request)) return Response.json({ error: "Neplatný původ požadavku." }, { status: 403 })
   const blocked = await guard()
   if (blocked) return blocked
+  const ownerId = await authenticatedOwnerId()
+  if (!ownerId) return Response.json({ error: "Nejste přihlášeni." }, { status: 401 })
+  const limited = await rateLimitResponse(request, `memory-write:${ownerId}`, 30, 60_000)
+  if (limited) return limited
   const parsed = itemSchema.safeParse(await request.json().catch(() => null))
   if (!parsed.success) return Response.json({ error: "Neplatná položka paměti." }, { status: 400 })
   try {
-    await upsertMemory(parsed.data)
+    await upsertMemory(ownerId, parsed.data)
     return Response.json({ ok: true })
   } catch (error) {
     return failure(error)
@@ -52,12 +63,17 @@ export async function PUT(request: Request) {
 }
 
 export async function DELETE(request: Request) {
+  if (!hasValidRequestOrigin(request)) return Response.json({ error: "Neplatný původ požadavku." }, { status: 403 })
   const blocked = await guard()
   if (blocked) return blocked
+  const ownerId = await authenticatedOwnerId()
+  if (!ownerId) return Response.json({ error: "Nejste přihlášeni." }, { status: 401 })
+  const limited = await rateLimitResponse(request, `memory-delete:${ownerId}`, 20, 60_000)
+  if (limited) return limited
   const id = new URL(request.url).searchParams.get("id")
   if (!id || id.length > 64) return Response.json({ error: "Chybí ID." }, { status: 400 })
   try {
-    await deleteMemory(id)
+    await deleteMemory(ownerId, id)
     return Response.json({ ok: true })
   } catch (error) {
     return failure(error)

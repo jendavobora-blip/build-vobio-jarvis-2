@@ -1,7 +1,7 @@
 "use client"
 
 import { CheckCircle2, CircleSlash, LogIn, LogOut, RotateCcw } from "lucide-react"
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { SlideOver } from "./slide-over"
 import { AGENTS, SPECIALISTS } from "@/lib/jarvis/agents"
 import { formatUsd, MODEL_LABELS } from "@/lib/jarvis/pricing"
@@ -26,7 +26,7 @@ interface SettingsDrawerProps {
 export function SettingsDrawer(props: SettingsDrawerProps) {
   const { open, onClose, settings, setSettings, status, statusError, lifetime } = props
   const patch = (p: Partial<JarvisSettings>) => setSettings((s) => ({ ...s, ...p }))
-  const liveReady = Boolean(status?.deepseekConfigured && status.authConfigured)
+  const liveReady = Boolean(status?.liveEnabled && status.deepseekConfigured && status.authConfigured)
 
   return (
     <SlideOver open={open} onClose={onClose} title="Nastavení" description="Připojení, agenti, rozpočet a zabezpečení.">
@@ -38,16 +38,19 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
             </p>
           )}
           <StatusRow ok={Boolean(status?.deepseekConfigured)} label="DeepSeek API" detail={status?.deepseekConfigured ? "Klíč je nastaven na serveru" : "Chybí DEEPSEEK_API_KEY"} />
+          <StatusRow ok={Boolean(status?.liveEnabled)} label="Povolení živého backendu" detail={status?.liveEnabled ? "Serverový přepínač je zapnutý" : "Zablokováno do schválení designu"} />
           <StatusRow ok={Boolean(status?.authConfigured)} label="Přihlášení" detail={status?.authConfigured ? "Přístupový kód je nastaven" : "Chybí JARVIS_ACCESS_CODE (min. 8 znaků)"} />
           <StatusRow ok={Boolean(status?.authenticated)} label="Relace" detail={status?.authenticated ? "Přihlášeno" : "Nepřihlášeno"} />
           <StatusRow ok={Boolean(status?.databaseConfigured)} label="Databáze (volitelná)" detail={status?.databaseConfigured ? "DATABASE_URL nastavena" : "Paměť jen v tomto zařízení"} optional />
           {status?.authConfigured && <AuthBox authenticated={status.authenticated} onChange={props.onStatusChange} />}
+          {status?.authenticated && status.userRole === "owner" && <AccountManager />}
+          {!status?.authenticated && status?.databaseConfigured && <AccountEnrollment onComplete={props.onStatusChange} />}
         </Section>
 
         <Section title="Režim">
           <Toggle
             label="Živý režim (skutečná volání DeepSeek)"
-            hint={liveReady ? (status?.authenticated ? "Vypnutím přejdete do DEMO REŽIMU." : "Nejprve se přihlaste.") : "Nedostupné – chybí konfigurace serveru."}
+            hint={liveReady ? (status?.authenticated ? "Vypnutím přejdete do DEMO REŽIMU." : "Nejprve se přihlaste.") : "Nedostupné – čeká na schválení designu a povolení serveru."}
             checked={settings.liveMode && liveReady}
             disabled={!liveReady}
             onChange={(v) => patch({ liveMode: v })}
@@ -77,7 +80,7 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
         </Section>
 
         <Section title="Agenti">
-          <p className="text-xs text-muted-foreground">Orchestrátor je vždy aktivní a vybírá z povolených specialistů.</p>
+          <p className="text-xs text-muted-foreground">Router je vždy aktivní a vybírá z povolených specialistů.</p>
           {SPECIALISTS.map((id) => (
             <Toggle
               key={id}
@@ -149,7 +152,7 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
         </Section>
 
         <p className="pb-4 text-center font-mono text-[10px] uppercase tracking-[0.25em] text-muted-foreground/60">
-          VOBIO JARVIS 2.0 · Jan Vobora
+          VOBIO JARVIS · Jan Vobora
         </p>
       </div>
     </SlideOver>
@@ -158,6 +161,8 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
 
 function AuthBox({ authenticated, onChange }: { authenticated: boolean; onChange: () => void }) {
   const [code, setCode] = useState("")
+  const [email, setEmail] = useState("")
+  const [password, setPassword] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -187,12 +192,14 @@ function AuthBox({ authenticated, onChange }: { authenticated: boolean; onChange
           const res = await fetch("/api/auth", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ code }),
+             body: JSON.stringify(code ? { code } : { email, password }),
           })
           const data = await res.json().catch(() => ({}))
           if (!res.ok) setError(data.error ?? "Přihlášení selhalo.")
           else {
             setCode("")
+            setEmail("")
+            setPassword("")
             onChange()
           }
         } catch {
@@ -203,18 +210,22 @@ function AuthBox({ authenticated, onChange }: { authenticated: boolean; onChange
       }}
     >
       <label htmlFor="access-code" className="text-sm text-muted-foreground">
-        Přístupový kód
+        Přístupový kód vlastníka (nebo účet pozvaného uživatele)
       </label>
-      <div className="flex gap-2">
+      <div className="space-y-2">
         <input
           id="access-code"
           type="password"
           autoComplete="current-password"
           value={code}
           onChange={(e) => setCode(e.target.value)}
-          className="min-h-11 flex-1 rounded-xl border border-input bg-background px-3 text-base"
+          className="min-h-11 w-full rounded-xl border border-input bg-background px-3 text-base"
         />
-        <button type="submit" disabled={busy || !code} className="flex min-h-11 items-center gap-2 rounded-xl bg-primary px-4 text-sm font-semibold text-primary-foreground disabled:opacity-40">
+        <label htmlFor="account-email" className="text-sm text-muted-foreground">E-mail pozvaného uživatele</label>
+        <input id="account-email" type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} className="min-h-11 w-full rounded-xl border border-input bg-background px-3 text-base" />
+        <label htmlFor="account-password" className="text-sm text-muted-foreground">Heslo účtu (min. 12 znaků)</label>
+        <input id="account-password" type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} className="min-h-11 w-full rounded-xl border border-input bg-background px-3 text-base" />
+        <button type="submit" disabled={busy || (!code && (!email || password.length < 12))} className="flex min-h-11 items-center gap-2 rounded-xl bg-primary px-4 text-sm font-semibold text-primary-foreground disabled:opacity-40">
           <LogIn className="size-4" aria-hidden="true" /> {busy ? "…" : "Přihlásit"}
         </button>
       </div>
@@ -223,6 +234,117 @@ function AuthBox({ authenticated, onChange }: { authenticated: boolean; onChange
           {error}
         </p>
       )}
+    </form>
+  )
+}
+
+interface AccountSummary {
+  id: string
+  email: string
+  active: boolean
+  created_at: string
+}
+
+function AccountManager() {
+  const [email, setEmail] = useState("")
+  const [accounts, setAccounts] = useState<AccountSummary[]>([])
+  const [inviteToken, setInviteToken] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const refresh = async () => {
+    try {
+      const response = await fetch("/api/accounts", { cache: "no-store" })
+      const body = await response.json()
+      if (!response.ok) throw new Error(body.error ?? "Účty nelze načíst.")
+      setAccounts(body.items)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Účty nelze načíst.")
+    }
+  }
+
+  useEffect(() => { void refresh() }, [])
+
+  return (
+    <div className="space-y-3 rounded-2xl border border-border p-3">
+      <h4 className="text-sm font-semibold">Pozvané účty</h4>
+      <p className="text-xs text-muted-foreground">Pozvánka se nevysílá e-mailem. Jednorázový kód předejte pozvané osobě bezpečným kanálem.</p>
+      <form className="flex gap-2" onSubmit={async (event) => {
+        event.preventDefault()
+        setBusy(true)
+        setError(null)
+        setInviteToken(null)
+        try {
+          const response = await fetch("/api/accounts/invitations", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email }),
+          })
+          const body = await response.json()
+          if (!response.ok) throw new Error(body.error ?? "Pozvánku nelze vytvořit.")
+          setInviteToken(body.token)
+          setEmail("")
+          await refresh()
+        } catch (reason) {
+          setError(reason instanceof Error ? reason.message : "Pozvánku nelze vytvořit.")
+        } finally {
+          setBusy(false)
+        }
+      }}>
+        <input type="email" required maxLength={254} aria-label="E-mail pro pozvánku" value={email} onChange={(event) => setEmail(event.target.value)} className="min-h-11 min-w-0 flex-1 rounded-xl border border-input bg-background px-3" />
+        <button type="submit" disabled={busy} className="min-h-11 rounded-xl bg-primary px-3 text-sm text-primary-foreground">{busy ? "…" : "Vytvořit pozvánku"}</button>
+      </form>
+      {inviteToken && <p role="status" className="break-all rounded-xl bg-secondary p-3 text-xs">Kód platí 24 hodin; zobrazí se pouze nyní: <code>{inviteToken}</code></p>}
+      {accounts.map((account) => <div key={account.id} className="flex items-center justify-between gap-2 border-t border-border pt-2 text-sm"><span>{account.email} · {account.active ? "aktivní" : "deaktivovaný"}</span><button type="button" onClick={async () => {
+        setError(null)
+        try {
+          const response = await fetch("/api/accounts", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: account.id, active: !account.active }) })
+          if (!response.ok) {
+            const body = await response.json().catch(() => ({}))
+            throw new Error(body.error ?? "Stav účtu nelze změnit.")
+          }
+          await refresh()
+        } catch (reason) {
+          setError(reason instanceof Error ? reason.message : "Stav účtu nelze změnit.")
+        }
+      }} className="min-h-9 rounded-lg bg-secondary px-2 text-xs">{account.active ? "Deaktivovat" : "Aktivovat"}</button></div>)}
+      {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+    </div>
+  )
+}
+
+function AccountEnrollment({ onComplete }: { onComplete: () => void }) {
+  const [email, setEmail] = useState("")
+  const [token, setToken] = useState("")
+  const [password, setPassword] = useState("")
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  return (
+    <form className="space-y-2 rounded-2xl border border-border p-3" onSubmit={async (event) => {
+      event.preventDefault()
+      setBusy(true)
+      setError(null)
+      try {
+        const response = await fetch("/api/accounts/invitations/redeem", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, token, password }),
+        })
+        const body = await response.json()
+        if (!response.ok) throw new Error(body.error ?? "Registrace selhala.")
+        onComplete()
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : "Registrace selhala.")
+      } finally {
+        setBusy(false)
+      }
+    }}>
+      <h4 className="text-sm font-semibold">Přijmout pozvánku</h4>
+      <label className="block text-xs">E-mail<input required type="email" value={email} onChange={(event) => setEmail(event.target.value)} className="mt-1 min-h-10 w-full rounded-lg border border-input bg-background px-2" /></label>
+      <label className="block text-xs">Jednorázový kód pozvánky<input required value={token} onChange={(event) => setToken(event.target.value)} className="mt-1 min-h-10 w-full rounded-lg border border-input bg-background px-2" /></label>
+      <label className="block text-xs">Nové heslo (min. 12 znaků)<input required type="password" minLength={12} maxLength={128} autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} className="mt-1 min-h-10 w-full rounded-lg border border-input bg-background px-2" /></label>
+      <button type="submit" disabled={busy} className="min-h-10 rounded-xl bg-primary px-3 text-sm text-primary-foreground">{busy ? "…" : "Vytvořit účet"}</button>
+      {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
     </form>
   )
 }

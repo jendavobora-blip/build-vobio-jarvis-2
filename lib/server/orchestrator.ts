@@ -1,6 +1,6 @@
 import "server-only"
 import { z } from "zod"
-import { callJson, DeepSeekError } from "./deepseek"
+import { callJson, DeepSeekError, MAX_ATTEMPTS } from "./deepseek"
 import { plannerSystem, specialistSystem, synthesisSystem } from "./prompts"
 import { AGENTS, QUICK_MAX_SPECIALISTS, SPECIALISTS } from "@/lib/jarvis/agents"
 import { addUsage, emptyUsage, worstCaseCost } from "@/lib/jarvis/pricing"
@@ -92,11 +92,27 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
   const start = now()
   const runId = crypto.randomUUID()
 
-  const withinBudget = (promptText: string, maxOut: number) => {
+  let inFlightTokens = 0
+  let inFlightCost = 0
+  const reserveCallBudget = (promptText: string, maxOut: number): (() => void) | undefined => {
     const promptTokens = estimateTokens(promptText)
-    const projectedTokens = total.promptTokens + total.completionTokens + promptTokens + maxOut
-    const projectedCost = total.costUsd + worstCaseCost(body.model, promptTokens, maxOut)
-    return projectedTokens <= limits.maxTokens && projectedCost <= limits.maxCostUsd
+    const tokens = (promptTokens + maxOut) * MAX_ATTEMPTS
+    const cost = worstCaseCost(body.model, promptTokens, maxOut) * MAX_ATTEMPTS
+    if (
+      total.promptTokens + total.completionTokens + inFlightTokens + tokens > limits.maxTokens ||
+      total.costUsd + inFlightCost + cost > limits.maxCostUsd
+    ) {
+      return undefined
+    }
+    inFlightTokens += tokens
+    inFlightCost += cost
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      inFlightTokens -= tokens
+      inFlightCost -= cost
+    }
   }
 
   const track = (usage: Usage) => {
@@ -143,10 +159,11 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
   }`
   const planSys = plannerSystem(body.mode, available, limit)
   const planMax = maxTokensFor(body, "plan")
+  const planReservation = body.enabledAgents.length ? reserveCallBudget(planSys + planUser, planMax) : undefined
 
   if (body.enabledAgents.length === 0) {
     rationale = "Všichni specialisté jsou vypnutí v nastavení – odpovídá pouze orchestrátor."
-  } else if (withinBudget(planSys + planUser, planMax)) {
+  } else if (planReservation) {
     try {
       const plan = await callJson(
         { model: body.model, system: planSys, user: planUser, maxTokens: planMax, reasoning: body.reasoning, signal },
@@ -168,9 +185,12 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
       if (usage) track(usage)
       if (error instanceof DeepSeekError && error.fatal) {
         emit({ type: "agent_error", agent: "orchestrator", message: error.message, attempts: (error as { attempts?: number }).attempts ?? 1, at: now() })
+        Object.assign(error, { usage: total })
         throw error
       }
       rationale = "Plánování modelem selhalo – použit záložní výběr podle pracovního režimu."
+    } finally {
+      planReservation()
     }
   } else {
     rationale = "Rozpočet nestačí na plánovací krok – použit záložní výběr."
@@ -214,8 +234,9 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
       prior.length ? `\n\nVýstupy ostatních agentů:\n${formatOutputs(Object.fromEntries(prior.map((id) => [id, outputs[id]])))}` : ""
     }`
     const maxOut = maxTokensFor(body, "specialist")
+    const reservation = reserveCallBudget(system + user, maxOut)
 
-    if (!withinBudget(system + user, maxOut)) {
+    if (!reservation) {
       budgetStopped = true
       emit({ type: "budget_stop", reason: `${AGENTS[agent].name} přeskočen – byl by překročen limit požadavku.`, at: now() })
       emit({ type: "agent_status", agent, status: "skipped", task, activity: "Přeskočeno kvůli rozpočtu", at: now() })
@@ -255,7 +276,12 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
       const message = error instanceof DeepSeekError ? error.message : "Agent selhal."
       emit({ type: "agent_error", agent, message, attempts: (error as { attempts?: number }).attempts ?? 1, at: now() })
       emit({ type: "agent_status", agent, status: "error", task, activity: message, at: now() })
-      if (error instanceof DeepSeekError && error.fatal) throw error
+      if (error instanceof DeepSeekError && error.fatal) {
+        Object.assign(error, { usage: total })
+        throw error
+      }
+    } finally {
+      reservation()
     }
   }
 
@@ -274,13 +300,13 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
   /* 4. Synthesis */
   if (!signal.aborted) {
     const done = Object.keys(outputs) as AgentId[]
-    for (const id of done) emit({ type: "link", from: id, to: "orchestrator", at: now() })
+    for (const id of done) emit({ type: "link", from: id, to: "final_judge", at: now() })
     emit({
       type: "agent_status",
-      agent: "orchestrator",
+      agent: "final_judge",
       status: "thinking",
       task: "Syntéza výsledků",
-      activity: done.length ? `Spojuji ${done.length} výstup${done.length === 1 ? "" : "y"}` : "Odpovídám přímo",
+      activity: done.length ? `Nezávisle posuzuji ${done.length} výstup${done.length === 1 ? "" : "y"}` : "Kontroluji přímou odpověď",
       at: now(),
     })
     const system = synthesisSystem(body.mode)
@@ -289,8 +315,9 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
     }`
     const maxOut = maxTokensFor(body, "final")
     let result: FinalAnswer | undefined
+    const finalReservation = reserveCallBudget(system + user, maxOut)
 
-    if (withinBudget(system + user, maxOut)) {
+    if (finalReservation) {
       try {
         const synth = await callJson(
           { model: body.model, system, user, maxTokens: maxOut, reasoning: body.reasoning, signal },
@@ -298,17 +325,20 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
         )
         track(synth.usage)
         result = synth.data
-        emit({ type: "agent_status", agent: "orchestrator", status: "done", task: "Syntéza výsledků", activity: "Odpověď připravena", at: now() })
+        emit({ type: "agent_status", agent: "final_judge", status: "done", task: "Finální kontrola", activity: "Odpověď připravena", at: now() })
       } catch (error) {
         const usage = (error as { usage?: Usage }).usage
         if (usage && usage.promptTokens) track(usage)
         const message = error instanceof DeepSeekError ? error.message : "Syntéza selhala."
-        emit({ type: "agent_error", agent: "orchestrator", message, attempts: (error as { attempts?: number }).attempts ?? 1, at: now() })
-        emit({ type: "agent_status", agent: "orchestrator", status: "error", task: "Syntéza výsledků", activity: message, at: now() })
+        emit({ type: "agent_error", agent: "final_judge", message, attempts: (error as { attempts?: number }).attempts ?? 1, at: now() })
+        emit({ type: "agent_status", agent: "final_judge", status: "error", task: "Finální kontrola", activity: message, at: now() })
+      } finally {
+        finalReservation()
       }
     } else {
       budgetStopped = true
       emit({ type: "budget_stop", reason: "Syntéza přeskočena – byl by překročen limit požadavku.", at: now() })
+      emit({ type: "agent_status", agent: "final_judge", status: "skipped", task: "Finální kontrola", activity: "Přeskočeno kvůli rozpočtu", at: now() })
     }
 
     if (!result && done.length) {
@@ -319,7 +349,7 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
         nextSteps: [],
         needsApproval: [],
       }
-      emit({ type: "agent_status", agent: "orchestrator", status: "done", task: "Nouzová syntéza", activity: "Zobrazeny dílčí výsledky", at: now() })
+      emit({ type: "agent_status", agent: "final_judge", status: "done", task: "Záložní výstup", activity: "Zobrazeny dílčí výsledky", at: now() })
     }
     if (result) emit({ type: "final", result, at: now() })
     else if (!budgetStopped) emit({ type: "error", message: "Nepodařilo se získat žádný výsledek.", at: now() })
