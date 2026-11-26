@@ -4,6 +4,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { serverConfig } from "./config"
 import { decryptText, encryptText, ownerId } from "./auth"
 import type { AgentId, MemoryItem } from "@/lib/jarvis/types"
+import type { DevelopmentStudioEvent, DevelopmentStudioMockRun } from "@/lib/jarvis/development-studio"
 
 type Sql = ReturnType<typeof neon>
 const OWNER_MIGRATION = "2026-11-stable-owner-v1"
@@ -129,6 +130,33 @@ async function ensureSchema(sql: Sql) {
       event TEXT NOT NULL CHECK (event IN ('created', 'critical_reviewed', 'approved', 'denied', 'execution_authorized')),
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )`
+    await sql`CREATE TABLE IF NOT EXISTS jarvis_development_studio_runs (
+      id UUID PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      actor_id TEXT NOT NULL,
+      repository TEXT NOT NULL,
+      task_hash TEXT NOT NULL CHECK (task_hash ~ '^[a-f0-9]{64}$'),
+      mode TEXT NOT NULL CHECK (mode = 'mock_only'),
+      status TEXT NOT NULL CHECK (status IN ('blocked', 'failed')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE (id, owner_id, actor_id)
+    )`
+    await sql`CREATE TABLE IF NOT EXISTS jarvis_development_studio_events (
+      id TEXT PRIMARY KEY,
+      run_id UUID NOT NULL,
+      owner_id TEXT NOT NULL,
+      actor_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL CHECK (agent_id IN ('system', 'architect', 'frontend', 'backend', 'ai', 'security', 'qa', 'devops', 'reviewer')),
+      event TEXT NOT NULL CHECK (event IN ('run_started', 'agent_started', 'agent_mocked', 'executor_blocked', 'run_blocked')),
+      detail_code TEXT NOT NULL CHECK (detail_code IN ('mock_only', 'sandbox_not_configured')),
+      occurred_at TIMESTAMPTZ NOT NULL,
+      FOREIGN KEY (run_id, owner_id, actor_id)
+        REFERENCES jarvis_development_studio_runs (id, owner_id, actor_id) ON DELETE CASCADE
+    )`
+    await sql`CREATE INDEX IF NOT EXISTS jarvis_development_studio_runs_owner_actor_created
+      ON jarvis_development_studio_runs (owner_id, actor_id, created_at DESC)`
+    await sql`CREATE INDEX IF NOT EXISTS jarvis_development_studio_events_run_actor
+      ON jarvis_development_studio_events (run_id, owner_id, actor_id, occurred_at)`
     await sql`CREATE TABLE IF NOT EXISTS jarvis_orchestration_audit (
       id UUID PRIMARY KEY,
       event_key TEXT NOT NULL,
@@ -455,6 +483,85 @@ export async function listApprovalAudit(ownerId: string): Promise<{ approval_id:
     event: string
     created_at: string | Date
   }[]
+}
+
+export interface DevelopmentStudioRunRow {
+  id: string
+  repository: string
+  task_hash: string
+  mode: "mock_only"
+  status: "blocked" | "failed"
+  created_at: string | Date
+}
+
+export async function persistDevelopmentStudioMockRun(
+  ownerId: string,
+  actorId: string,
+  run: DevelopmentStudioMockRun,
+): Promise<void> {
+  if (!ownerId || !actorId || !run.id || run.mode !== "mock_only" || run.status !== "blocked" ||
+      run.plan.repository !== run.repository || !/^[a-f0-9]{64}$/.test(run.taskHash) ||
+      run.events.length !== 3 + run.plan.steps.length * 2 ||
+      run.events.some((event) => event.runId !== run.id || !event.id)) {
+    throw new Error("Neplatný běh Development Studia.")
+  }
+  const sql = await db()
+  if (!sql) throw new Error("Historie Development Studia vyžaduje sdílenou databázi.")
+  await sql.transaction((tx) => [
+    tx`INSERT INTO jarvis_development_studio_runs
+      (id, owner_id, actor_id, repository, task_hash, mode, status)
+      VALUES (${run.id}::uuid, ${ownerId}, ${actorId}, ${run.repository}, ${run.taskHash}, ${run.mode}, ${run.status})`,
+    ...run.events.map((event) => tx`INSERT INTO jarvis_development_studio_events
+      (id, run_id, owner_id, actor_id, agent_id, event, detail_code, occurred_at)
+      VALUES (${event.id}, ${run.id}::uuid, ${ownerId}, ${actorId}, ${event.agentId},
+        ${event.event}, ${event.detailCode}, ${event.occurredAt})`),
+  ])
+}
+
+export async function listDevelopmentStudioRuns(
+  ownerId: string,
+  actorId: string,
+  limit = 20,
+): Promise<DevelopmentStudioRunRow[]> {
+  if (!ownerId || !actorId || !Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new Error("Neplatný rozsah historie Development Studia.")
+  }
+  const sql = await db()
+  if (!sql) throw new Error("Historie Development Studia vyžaduje sdílenou databázi.")
+  return (await sql`SELECT id, repository, task_hash, mode, status, created_at
+    FROM jarvis_development_studio_runs
+    WHERE owner_id = ${ownerId} AND actor_id = ${actorId}
+    ORDER BY created_at DESC LIMIT ${limit}`) as DevelopmentStudioRunRow[]
+}
+
+export async function getDevelopmentStudioRun(
+  ownerId: string,
+  actorId: string,
+  runId: string,
+): Promise<DevelopmentStudioRunRow | undefined> {
+  if (!ownerId || !actorId || !runId) throw new Error("Neplatný rozsah běhu Development Studia.")
+  const sql = await db()
+  if (!sql) throw new Error("Historie Development Studia vyžaduje sdílenou databázi.")
+  const rows = (await sql`SELECT id, repository, task_hash, mode, status, created_at
+    FROM jarvis_development_studio_runs
+    WHERE id = ${runId}::uuid AND owner_id = ${ownerId} AND actor_id = ${actorId}
+    LIMIT 1`) as DevelopmentStudioRunRow[]
+  return rows[0]
+}
+
+export async function listDevelopmentStudioEvents(
+  ownerId: string,
+  actorId: string,
+  runId: string,
+): Promise<DevelopmentStudioEvent[]> {
+  if (!ownerId || !actorId || !runId) throw new Error("Neplatný rozsah auditu Development Studia.")
+  const sql = await db()
+  if (!sql) throw new Error("Audit Development Studia vyžaduje sdílenou databázi.")
+  return (await sql`SELECT id, run_id AS "runId", agent_id AS "agentId", event,
+      detail_code AS "detailCode", occurred_at::text AS "occurredAt"
+    FROM jarvis_development_studio_events
+    WHERE run_id = ${runId}::uuid AND owner_id = ${ownerId} AND actor_id = ${actorId}
+    ORDER BY occurred_at ASC LIMIT 100`) as DevelopmentStudioEvent[]
 }
 
 export type OrchestrationAuditEvent =
