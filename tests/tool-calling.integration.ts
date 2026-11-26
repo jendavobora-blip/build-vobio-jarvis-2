@@ -1,10 +1,13 @@
 import assert from "node:assert/strict"
 import { afterEach, test } from "node:test"
 import type { ChatRequestBody, RunEvent } from "../lib/jarvis/types"
+import { isToolAllowed } from "../lib/server/tool-permissions"
+import type { OrchestrationAuditEvent } from "../lib/server/db"
 
 const originalFetch = globalThis.fetch
 const envKeys = ["DEEPSEEK_API_KEY", "JARVIS_LIVE_ENABLED", "JARVIS_VERCEL_ENV"] as const
 const originalEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]))
+const ignoreAudit = async (_event: OrchestrationAuditEvent) => {}
 
 afterEach(() => {
   globalThis.fetch = originalFetch
@@ -136,17 +139,29 @@ const orionMemory: ChatRequestBody["memories"] = [
   { id: "m1", category: "projects", title: "Projekt Orion", content: "Orion je interní projekt zaměřený na orchestraci agentů." },
 ]
 
+test("server-side tool permissions grant search_memory only to the memory agent", () => {
+  assert.equal(isToolAllowed("memory", "search_memory"), true)
+  for (const agent of ["orchestrator", "researcher", "planner", "analyst", "creator", "auditor", "final_judge"] as const) {
+    assert.equal(isToolAllowed(agent, "search_memory"), false)
+  }
+  assert.equal(isToolAllowed("memory", "delete_everything"), false)
+})
+
 test("search_memory tool round succeeds and records invocation and outcome", async () => {
   process.env.DEEPSEEK_API_KEY = "integration-test-placeholder"
   const calls = installFetch({ firstCall: "tool", finalCall: "json", context: "Orion je interní projekt." })
 
   const { runOrchestration } = await import("../lib/server/orchestrator")
   const events: RunEvent[] = []
+  const audit: OrchestrationAuditEvent[] = []
   const result = await runOrchestration({
     body: makeBody(orionMemory),
     emit: (event) => events.push(event),
     signal: new AbortController().signal,
     limits: { maxTokens: 500_000, maxCostUsd: 5 },
+    audit: async (event) => {
+      audit.push(event)
+    },
   })
 
   const toolCalls = calls.filter((call) => call.system.includes("search_memory"))
@@ -158,6 +173,8 @@ test("search_memory tool round succeeds and records invocation and outcome", asy
   assert.ok(statuses.some((status) => status.agent === "memory" && status.activity === "search_memory: 1 výsledků"))
   assert.ok(statuses.some((status) => status.agent === "memory" && status.activity === "Tool dokončen: 1 výsledků"))
   assert.equal(errorEvents(events).filter((event) => event.agent === "memory").length, 0)
+  assert.deepEqual(audit.map((event) => event.event), ["run_started", "tool_requested", "tool_succeeded", "run_completed"])
+  assert.equal(JSON.stringify(audit).includes(orionMemory[0]!.content), false)
   assert.ok(events.some((event) => event.type === "final"))
   assert.ok(result.promptTokens > 0)
 })
@@ -168,15 +185,20 @@ test("unknown tool name is rejected visibly and not reported as success", async 
 
   const { runOrchestration } = await import("../lib/server/orchestrator")
   const events: RunEvent[] = []
+  const audit: OrchestrationAuditEvent[] = []
   await runOrchestration({
     body: makeBody(orionMemory),
     emit: (event) => events.push(event),
     signal: new AbortController().signal,
     limits: { maxTokens: 500_000, maxCostUsd: 5 },
+    audit: async (event) => {
+      audit.push(event)
+    },
   })
 
   const memoryErrors = errorEvents(events).filter((event) => event.agent === "memory")
   assert.ok(memoryErrors.some((event) => String(event.message).includes("Nepovolený") || String(event.message).includes("Neznámý")))
+  assert.deepEqual(audit.map((event) => event.event), ["run_started", "tool_requested", "tool_denied", "run_completed"])
   const statuses = statusEvents(events)
   assert.ok(!statuses.some((status) => status.activity?.startsWith("Tool dokončen")))
 })
@@ -192,6 +214,7 @@ test("invalid tool arguments are rejected visibly", async () => {
     emit: (event) => events.push(event),
     signal: new AbortController().signal,
     limits: { maxTokens: 500_000, maxCostUsd: 5 },
+    audit: ignoreAudit,
   })
 
   const memoryErrors = errorEvents(events).filter((event) => event.agent === "memory")
@@ -211,6 +234,7 @@ test("tool calls are capped to a single round even if the model keeps requesting
     emit: (event) => events.push(event),
     signal: new AbortController().signal,
     limits: { maxTokens: 500_000, maxCostUsd: 5 },
+    audit: ignoreAudit,
   })
 
   const executions = statusEvents(events).filter((status) => status.activity?.startsWith("search_memory:"))
@@ -234,6 +258,7 @@ test("budget exhaustion skips the tool visibly without calling the model", async
     emit: (event) => events.push(event),
     signal: new AbortController().signal,
     limits: { maxTokens: 200, maxCostUsd: 0.0005 },
+    audit: ignoreAudit,
   })
 
   const budgetStops = events.filter((event) => event.type === "budget_stop") as unknown as { reason?: string }[]
@@ -252,6 +277,7 @@ test("memory agent disabled never starts search_memory", async () => {
     emit: (event) => events.push(event),
     signal: new AbortController().signal,
     limits: { maxTokens: 500_000, maxCostUsd: 5 },
+    audit: ignoreAudit,
   })
   assert.equal(calls.filter((call) => call.system.includes("search_memory")).length, 0)
   assert.ok(statusEvents(events).some((status) => status.agent === "memory" && status.status === "skipped"))
@@ -293,6 +319,7 @@ test("multiple tool_calls are rejected and none is executed", async () => {
     emit: (event) => events.push(event),
     signal: new AbortController().signal,
     limits: { maxTokens: 500_000, maxCostUsd: 5 },
+    audit: ignoreAudit,
   })
   assert.equal(toolCallsSeen, 1)
   assert.ok(errorEvents(events).some((event) => event.message?.includes("nejvýše jedno")))
@@ -321,6 +348,7 @@ test("API error is emitted explicitly and never converted into an empty success"
     emit: (event) => events.push(event),
     signal: new AbortController().signal,
     limits: { maxTokens: 500_000, maxCostUsd: 5 },
+    audit: ignoreAudit,
   })
   assert.ok(calls >= 1)
   assert.ok(errorEvents(events).some((event) => event.agent === "memory"))
@@ -350,6 +378,7 @@ test("concurrent specialist reservations cannot exceed a shared token budget", a
     emit: () => {},
     signal: new AbortController().signal,
     limits: { maxTokens: 300, maxCostUsd: 0.0005 },
+    audit: ignoreAudit,
   })
   assert.ok(calls.length <= 4)
 })
@@ -375,6 +404,7 @@ test("UTF-8 and multilingual payloads use a conservative budget reservation", as
     emit: (event) => events.push(event),
     signal: new AbortController().signal,
     limits: { maxTokens: 300, maxCostUsd: 0.001 },
+    audit: ignoreAudit,
   })
   assert.equal(calls, 0)
   assert.ok(events.some((event) => event.type === "budget_stop"))

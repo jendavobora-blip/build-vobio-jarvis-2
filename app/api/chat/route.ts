@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto"
 import { authenticatedUser } from "@/lib/server/auth"
 import { isLiveAvailable, serverConfig } from "@/lib/server/config"
 import { clientIp, rateLimit } from "@/lib/server/rate-limit"
-import { reserveDailyBudget, settleDailyBudget } from "@/lib/server/db"
+import { recordOrchestrationAuditEvent, reserveDailyBudget, settleDailyBudget } from "@/lib/server/db"
 import { runOrchestration } from "@/lib/server/orchestrator"
 import { DeepSeekError } from "@/lib/server/deepseek"
 import { SPECIALISTS } from "@/lib/jarvis/agents"
@@ -117,8 +117,18 @@ export async function POST(request: Request) {
       }, 15_000)
 
       let spent = { costUsd: 0, tokens: 0 }
+      let auditRunId: string | undefined
       try {
-        const total = await runOrchestration({ body: parsed, emit, signal: abort.signal, limits })
+        const total = await runOrchestration({
+          body: parsed,
+          emit: (event) => {
+            if (event.type === "run_start") auditRunId = event.runId
+            emit(event)
+          },
+          signal: abort.signal,
+          limits,
+          audit: (event) => recordOrchestrationAuditEvent(user.ownerId, user.id, event),
+        })
         spent = { costUsd: total.costUsd, tokens: total.promptTokens + total.completionTokens }
       } catch (error) {
         const usage = (error as { usage?: { costUsd?: number; promptTokens?: number; completionTokens?: number } }).usage
@@ -126,6 +136,17 @@ export async function POST(request: Request) {
           spent = {
             costUsd: Math.max(0, usage.costUsd ?? 0),
             tokens: Math.max(0, (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0)),
+          }
+        }
+        if (auditRunId) {
+          try {
+            await recordOrchestrationAuditEvent(user.ownerId, user.id, {
+              runId: auditRunId,
+              agentId: "orchestrator",
+              event: "run_failed",
+            })
+          } catch (auditError) {
+            console.error("[jarvis] orchestration failure audit failed", auditError instanceof Error ? auditError.message : auditError)
           }
         }
         const message =

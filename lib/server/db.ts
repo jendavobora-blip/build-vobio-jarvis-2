@@ -3,7 +3,7 @@ import { neon } from "@neondatabase/serverless"
 import { randomUUID } from "node:crypto"
 import { serverConfig } from "./config"
 import { decryptText, encryptText, ownerId } from "./auth"
-import type { MemoryItem } from "@/lib/jarvis/types"
+import type { AgentId, MemoryItem } from "@/lib/jarvis/types"
 
 type Sql = ReturnType<typeof neon>
 const OWNER_MIGRATION = "2026-11-stable-owner-v1"
@@ -128,6 +128,18 @@ async function ensureSchema(sql: Sql) {
       event TEXT NOT NULL CHECK (event IN ('created', 'critical_reviewed', 'approved', 'denied', 'execution_authorized')),
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )`
+    await sql`CREATE TABLE IF NOT EXISTS jarvis_orchestration_audit (
+      id UUID PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      actor_id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL CHECK (agent_id IN ('orchestrator', 'researcher', 'memory', 'planner', 'analyst', 'creator', 'auditor', 'final_judge')),
+      event TEXT NOT NULL CHECK (event IN ('run_started', 'run_completed', 'run_failed', 'tool_requested', 'tool_denied', 'tool_succeeded', 'tool_failed')),
+      tool_name TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`
+    await sql`CREATE INDEX IF NOT EXISTS jarvis_orchestration_audit_owner_actor_created
+      ON jarvis_orchestration_audit (owner_id, actor_id, created_at DESC)`
     await sql`CREATE TABLE IF NOT EXISTS jarvis_accounts (
       id UUID PRIMARY KEY,
       owner_id UUID NOT NULL,
@@ -427,6 +439,57 @@ export async function listApprovalAudit(ownerId: string): Promise<{ approval_id:
     event: string
     created_at: string | Date
   }[]
+}
+
+export type OrchestrationAuditEvent =
+  | { runId: string; agentId: AgentId; event: "run_started" | "run_completed" | "run_failed" }
+  | { runId: string; agentId: AgentId; event: "tool_requested" | "tool_denied" | "tool_succeeded" | "tool_failed"; toolName: string }
+
+export interface OrchestrationAuditRow {
+  run_id: string
+  agent_id: AgentId
+  event: OrchestrationAuditEvent["event"]
+  tool_name: string | null
+  actor_id: string
+  created_at: string | Date
+}
+
+export async function recordOrchestrationAuditEvent(
+  ownerId: string,
+  actorId: string,
+  event: OrchestrationAuditEvent,
+): Promise<void> {
+  if (!ownerId || !actorId || !event.runId) throw new Error("Chybí tenant, uživatel nebo identifikátor orchestrace.")
+  const toolName = "toolName" in event ? event.toolName.trim().slice(0, 128) : null
+  if ("toolName" in event && !toolName) throw new Error("Auditní událost nástroje musí obsahovat název.")
+  if (toolName && /[\u0000-\u001f\u007f]/.test(toolName)) throw new Error("Název nástroje obsahuje nepovolené znaky.")
+  const sql = await db()
+  if (!sql) throw new Error("Audit orchestrace vyžaduje sdílenou databázi.")
+  await sql`INSERT INTO jarvis_orchestration_audit
+    (id, owner_id, actor_id, run_id, agent_id, event, tool_name)
+    VALUES (${randomUUID()}::uuid, ${ownerId}, ${actorId}, ${event.runId}, ${event.agentId}, ${event.event}, ${toolName})`
+}
+
+export async function listOrchestrationAudit(
+  ownerId: string,
+  actorId?: string,
+  limit = 100,
+): Promise<OrchestrationAuditRow[]> {
+  if (!ownerId || (actorId !== undefined && !actorId) || !Number.isInteger(limit) || limit < 1 || limit > 500) {
+    throw new Error("Neplatný rozsah auditního dotazu.")
+  }
+  const sql = await db()
+  if (!sql) throw new Error("Audit orchestrace vyžaduje sdílenou databázi.")
+  if (actorId) {
+    return (await sql`SELECT run_id, agent_id, event, tool_name, actor_id, created_at
+      FROM jarvis_orchestration_audit
+      WHERE owner_id = ${ownerId} AND actor_id = ${actorId}
+      ORDER BY created_at DESC LIMIT ${limit}`) as OrchestrationAuditRow[]
+  }
+  return (await sql`SELECT run_id, agent_id, event, tool_name, actor_id, created_at
+    FROM jarvis_orchestration_audit
+    WHERE owner_id = ${ownerId}
+    ORDER BY created_at DESC LIMIT ${limit}`) as OrchestrationAuditRow[]
 }
 
 export async function consumeApproval(ownerId: string, id: string, planHash: string): Promise<string | undefined> {

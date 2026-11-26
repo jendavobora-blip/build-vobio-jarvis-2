@@ -2,10 +2,12 @@ import "server-only"
 import { z } from "zod"
 import { callChat, callChatJson, callJson, DeepSeekError, MAX_ATTEMPTS, type ChatMessage } from "./deepseek"
 import { plannerSystem, specialistSystem, synthesisSystem } from "./prompts"
-import { executeSearchMemory, SEARCH_MEMORY_TOOL, TOOL_NAME, ToolError } from "./tools"
+import { executeSearchMemory, SEARCH_MEMORY_TOOL, ToolError } from "./tools"
 import { AGENTS, QUICK_MAX_SPECIALISTS, SPECIALISTS } from "@/lib/jarvis/agents"
 import { addUsage, emptyUsage, worstCaseCost } from "@/lib/jarvis/pricing"
 import { retrieveMemories } from "@/lib/jarvis/retrieval"
+import { isToolAllowed } from "./tool-permissions"
+import type { OrchestrationAuditEvent } from "./db"
 import type {
   AgentId,
   AgentOutput,
@@ -51,6 +53,7 @@ interface RunContext {
   emit: Emit
   signal: AbortSignal
   limits: { maxTokens: number; maxCostUsd: number }
+  audit: (event: OrchestrationAuditEvent) => Promise<void>
 }
 
 const now = () => Date.now()
@@ -121,11 +124,12 @@ function fallbackSelection(body: ChatRequestBody, limit: number): { agent: Speci
     .map((agent) => ({ agent, task: `${AGENTS[agent].role} pro zadaný úkol.` }))
 }
 
-export async function runOrchestration({ body, emit, signal, limits }: RunContext): Promise<Usage> {
+export async function runOrchestration({ body, emit, signal, limits, audit }: RunContext): Promise<Usage> {
   let total = emptyUsage()
   const start = now()
   const runId = crypto.randomUUID()
   let budgetStopped = false
+  await audit({ runId, agentId: "orchestrator", event: "run_started" })
 
   let inFlightTokens = 0
   let inFlightCost = 0
@@ -273,6 +277,7 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
 
     if (first.toolCalls.length !== 1) {
       const message = `Odmítnuto: model požadoval ${first.toolCalls.length} tool_calls; povoleno je nejvýše jedno.`
+      await audit({ runId, agentId: "memory", event: "tool_denied", toolName: "multiple_tool_calls" })
       emit({ type: "agent_error", agent: "memory", message, attempts: first.attempts, at: now() })
       emit({
         type: "agent_status",
@@ -293,9 +298,12 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
     // Exactly one tool call may enter this execution round.
     const call = first.toolCalls[0]
     const fn = call.function
-    if (fn.name !== TOOL_NAME) {
+    const auditToolName = fn.name.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 128) || "(empty)"
+    await audit({ runId, agentId: "memory", event: "tool_requested", toolName: auditToolName })
+    if (!isToolAllowed("memory", fn.name)) {
       toolFailed = true
       const message = `Neznámý nebo nepovolený nástroj: ${fn.name}`
+      await audit({ runId, agentId: "memory", event: "tool_denied", toolName: auditToolName })
       emit({ type: "agent_error", agent: "memory", message, attempts: first.attempts, at: now() })
       emit({
         type: "agent_status",
@@ -309,6 +317,7 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
     } else {
       try {
         const outcome = executeSearchMemory(body.memories, fn.arguments)
+        await audit({ runId, agentId: "memory", event: "tool_succeeded", toolName: auditToolName })
         matchCount = outcome.matches
         emit({
           type: "agent_status",
@@ -321,6 +330,7 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
         toolMessages.push({ role: "tool", tool_call_id: call.id, content: outcome.content })
       } catch (error) {
         toolFailed = true
+        await audit({ runId, agentId: "memory", event: "tool_failed", toolName: auditToolName })
         const message = error instanceof ToolError ? error.message : "Nástroj search_memory selhal."
         emit({ type: "agent_error", agent: "memory", message, attempts: first.attempts, at: now() })
         emit({
@@ -658,6 +668,7 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
       }
       emit({ type: "agent_status", agent: "final_judge", status: "done", task: "Záložní výstup", activity: "Zobrazeny dílčí výsledky", at: now() })
     }
+    await audit({ runId, agentId: "orchestrator", event: "run_completed" })
     if (result) emit({ type: "final", result, at: now() })
     else if (!budgetStopped) emit({ type: "error", message: "Nepodařilo se získat žádný výsledek.", at: now() })
     else emit({ type: "error", message: "Rozpočet požadavku byl vyčerpán dříve, než vznikl výsledek. Zvyšte limit v nastavení.", at: now() })
