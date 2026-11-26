@@ -73,16 +73,29 @@ export function parseSearchMemoryArgs(raw: string): SearchMemoryArgs {
     throw new ToolError("Argumenty nástroje musí být objekt.")
   }
   const obj = parsed as Record<string, unknown>
-  const query = typeof obj.query === "string" ? obj.query.trim().slice(0, MAX_QUERY_CHARS) : ""
+  const allowedKeys = new Set(["query", "limit"])
+  if (Object.keys(obj).some((key) => !allowedKeys.has(key))) {
+    throw new ToolError("Argumenty nástroje obsahují nepovolené pole.")
+  }
+  const query = typeof obj.query === "string" ? obj.query.trim() : ""
   if (query.length < 2) {
     throw new ToolError("Parametr 'query' musí mít alespoň 2 znaky.")
   }
+  if (query.length > MAX_QUERY_CHARS) {
+    throw new ToolError(`Parametr 'query' může mít nejvýše ${MAX_QUERY_CHARS} znaků.`)
+  }
+  if (/[\u0000-\u001f\u007f]/.test(query)) {
+    throw new ToolError("Parametr 'query' obsahuje nepovolené řídicí znaky.")
+  }
   let limit = MAX_RESULTS
   if (obj.limit !== undefined) {
-    if (typeof obj.limit !== "number" || !Number.isFinite(obj.limit)) {
-      throw new ToolError("Parametr 'limit' musí být číslo.")
+    if (typeof obj.limit !== "number" || !Number.isInteger(obj.limit)) {
+      throw new ToolError("Parametr 'limit' musí být celé číslo.")
     }
-    limit = Math.min(MAX_RESULTS, Math.max(1, Math.floor(obj.limit)))
+    if (obj.limit < 1 || obj.limit > MAX_RESULTS) {
+      throw new ToolError(`Parametr 'limit' musí být od 1 do ${MAX_RESULTS}.`)
+    }
+    limit = obj.limit
   }
   return { query, limit }
 }

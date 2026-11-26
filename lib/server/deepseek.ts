@@ -133,26 +133,90 @@ async function postChat(opts: RawChatOptions): Promise<RawChatResult> {
     throw describeStatus(response.status)
   }
 
-  const json = (await response.json()) as {
-    choices?: {
-      message?: { content?: string | null; tool_calls?: ToolCall[] }
-      finish_reason?: string
-    }[]
-    usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_cache_hit_tokens?: number }
+  let json: unknown
+  try {
+    json = await response.json()
+  } catch {
+    throw new DeepSeekError("DeepSeek vrátil nečitelnou JSON odpověď.", false)
   }
-  const promptTokens = json.usage?.prompt_tokens ?? 0
-  const completionTokens = json.usage?.completion_tokens ?? 0
-  const cacheHitTokens = json.usage?.prompt_cache_hit_tokens ?? 0
+  if (typeof json !== "object" || json === null) {
+    throw new DeepSeekError("DeepSeek vrátil neplatnou strukturu odpovědi.", false)
+  }
+  const envelope = json as {
+    choices?: unknown
+    usage?: unknown
+  }
+  if (!Array.isArray(envelope.choices) || envelope.choices.length === 0) {
+    throw new DeepSeekError("DeepSeek nevrátil žádnou volbu odpovědi.", false)
+  }
+  const choice = envelope.choices[0]
+  if (typeof choice !== "object" || choice === null) {
+    throw new DeepSeekError("DeepSeek vrátil neplatnou volbu odpovědi.", false)
+  }
+  const choicePayload = choice as {
+    message?: unknown
+    finish_reason?: unknown
+  }
+  if (typeof choicePayload.message !== "object" || choicePayload.message === null) {
+    throw new DeepSeekError("DeepSeek vrátil neplatnou zprávu odpovědi.", false)
+  }
+  const message = choicePayload.message as {
+    content?: unknown
+    tool_calls?: unknown
+  }
+  if (
+    typeof envelope.usage !== "object" ||
+    envelope.usage === null ||
+    typeof (envelope.usage as { prompt_tokens?: unknown }).prompt_tokens !== "number" ||
+    typeof (envelope.usage as { completion_tokens?: unknown }).completion_tokens !== "number"
+  ) {
+    throw new DeepSeekError("DeepSeek nevrátil platné údaje o spotřebě.", false)
+  }
+  const usagePayload = envelope.usage as {
+    prompt_tokens: number
+    completion_tokens: number
+    prompt_cache_hit_tokens?: unknown
+  }
+  const promptTokens = usagePayload.prompt_tokens
+  const completionTokens = usagePayload.completion_tokens
+  const cacheHitTokens =
+    typeof usagePayload.prompt_cache_hit_tokens === "number" ? usagePayload.prompt_cache_hit_tokens : 0
   const usage: Usage = {
     promptTokens,
     completionTokens,
     cacheHitTokens,
     costUsd: estimateCost(opts.model, promptTokens, completionTokens, cacheHitTokens),
   }
-  const message = json.choices?.[0]?.message
-  const content = message?.content ?? ""
-  const toolCalls = message && Array.isArray(message.tool_calls) ? message.tool_calls : []
-  const finishReason = json.choices?.[0]?.finish_reason ?? "stop"
+  const content = typeof message.content === "string" ? message.content : ""
+  let toolCalls: ToolCall[] = []
+  if (message.tool_calls !== undefined) {
+    if (!Array.isArray(message.tool_calls)) {
+      throw new DeepSeekError("DeepSeek vrátil neplatnou strukturu tool_calls.", false)
+    }
+    for (const rawCall of message.tool_calls) {
+      if (typeof rawCall !== "object" || rawCall === null) {
+        throw new DeepSeekError("DeepSeek vrátil neplatný tool call.", false)
+      }
+      const call = rawCall as {
+        id?: unknown
+        type?: unknown
+        function?: unknown
+      }
+      if (typeof call.id !== "string" || call.type !== "function" || typeof call.function !== "object" || call.function === null) {
+        throw new DeepSeekError("DeepSeek vrátil neplatný tool call.", false)
+      }
+      const fn = call.function as { name?: unknown; arguments?: unknown }
+      if (typeof fn.name !== "string" || typeof fn.arguments !== "string") {
+        throw new DeepSeekError("DeepSeek vrátil neplatný tool call.", false)
+      }
+      toolCalls.push({
+        id: call.id,
+        type: "function",
+        function: { name: fn.name, arguments: fn.arguments },
+      })
+    }
+  }
+  const finishReason = typeof choicePayload.finish_reason === "string" ? choicePayload.finish_reason : "stop"
   return { content, toolCalls, finishReason, usage }
 }
 

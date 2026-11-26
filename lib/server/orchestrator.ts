@@ -60,8 +60,38 @@ function maxTokensFor(body: ChatRequestBody, kind: "plan" | "specialist" | "fina
   return body.reasoning ? base + 2500 : base
 }
 
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 3) + 50
+function conservativeRequestPromptTokens(serializedRequest: string): number {
+  // Counting UTF-8 bytes is intentionally conservative for a text-only
+  // provider: non-ASCII and tool payloads can tokenize beyond character count.
+  return new TextEncoder().encode(serializedRequest).length + 64
+}
+
+function reserveChatRequest(
+  model: ModelId,
+  messages: readonly ChatMessage[],
+  maxOut: number,
+  reasoning: boolean,
+  jsonMode: boolean,
+  tools?: readonly unknown[],
+  toolChoice?: "auto" | "none",
+) {
+  const body: Record<string, unknown> = {
+    model,
+    messages,
+    max_tokens: maxOut,
+    thinking: { type: reasoning ? "enabled" : "disabled" },
+    stream: false,
+  }
+  if (reasoning) body.reasoning_effort = "low"
+  else body.temperature = 0.4
+  if (jsonMode) body.response_format = { type: "json_object" }
+  if (tools?.length) {
+    body.tools = tools
+    body.tool_choice = toolChoice ?? "auto"
+  }
+  const promptTokens = conservativeRequestPromptTokens(JSON.stringify(body))
+  const cost = worstCaseCost(model, promptTokens, maxOut)
+  return { promptTokens, cost, totalTokens: (promptTokens + maxOut) * MAX_ATTEMPTS, totalCost: cost * MAX_ATTEMPTS }
 }
 
 function formatOutputs(outputs: Partial<Record<AgentId, AgentOutput>>): string {
@@ -99,24 +129,30 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
 
   let inFlightTokens = 0
   let inFlightCost = 0
-  const reserveCallBudget = (promptText: string, maxOut: number, model: ModelId = body.model): (() => void) | undefined => {
-    const promptTokens = estimateTokens(promptText)
-    const tokens = (promptTokens + maxOut) * MAX_ATTEMPTS
-    const cost = worstCaseCost(model, promptTokens, maxOut) * MAX_ATTEMPTS
+  const reserveCallBudget = (
+    model: ModelId,
+    messages: readonly ChatMessage[],
+    maxOut: number,
+    reasoning: boolean,
+    jsonMode: boolean,
+    tools?: readonly unknown[],
+    toolChoice?: "auto" | "none",
+  ): (() => void) | undefined => {
+    const bound = reserveChatRequest(model, messages, maxOut, reasoning, jsonMode, tools, toolChoice)
     if (
-      total.promptTokens + total.completionTokens + inFlightTokens + tokens > limits.maxTokens ||
-      total.costUsd + inFlightCost + cost > limits.maxCostUsd
+      total.promptTokens + total.completionTokens + inFlightTokens + bound.totalTokens > limits.maxTokens ||
+      total.costUsd + inFlightCost + bound.totalCost > limits.maxCostUsd
     ) {
       return undefined
     }
-    inFlightTokens += tokens
-    inFlightCost += cost
+    inFlightTokens += bound.totalTokens
+    inFlightCost += bound.totalCost
     let released = false
     return () => {
       if (released) return
       released = true
-      inFlightTokens -= tokens
-      inFlightCost -= cost
+      inFlightTokens -= bound.totalTokens
+      inFlightCost -= bound.totalCost
     }
   }
 
@@ -141,6 +177,17 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
   /* 1b. Single fixed read-only tool round over the request's own memories (deepseek-flash). */
   const toolModel: ModelId = "deepseek-flash"
   const runMemoryTool = async (): Promise<string> => {
+    if (!body.enabledAgents.includes("memory")) {
+      emit({
+        type: "agent_status",
+        agent: "memory",
+        status: "skipped",
+        task: "Tool: search_memory",
+        activity: "Přístup k paměti je vypnutý",
+        at: now(),
+      })
+      return ""
+    }
     if (body.memories.length === 0) return ""
 
     const system =
@@ -156,7 +203,11 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
       at: now(),
     })
 
-    const reserveFirst = reserveCallBudget(system + user, 500, toolModel)
+    const firstMessages: ChatMessage[] = [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ]
+    const reserveFirst = reserveCallBudget(toolModel, firstMessages, 500, false, false, [SEARCH_MEMORY_TOOL], "auto")
     if (!reserveFirst) {
       budgetStopped = true
       emit({ type: "budget_stop", reason: "Nástroj search_memory přeskočen – byl by překročen limit požadavku.", at: now() })
@@ -190,6 +241,14 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
         attempts: (error as { attempts?: number }).attempts ?? 1,
         at: now(),
       })
+      emit({
+        type: "agent_status",
+        agent: "memory",
+        status: "error",
+        task: "Tool: search_memory",
+        activity: message,
+        at: now(),
+      })
       if (error instanceof DeepSeekError && error.fatal) {
         Object.assign(error, { usage: total })
         throw error
@@ -211,25 +270,45 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
       return ""
     }
 
+    if (first.toolCalls.length !== 1) {
+      const message = `Odmítnuto: model požadoval ${first.toolCalls.length} tool_calls; povoleno je nejvýše jedno.`
+      emit({ type: "agent_error", agent: "memory", message, attempts: first.attempts, at: now() })
+      emit({
+        type: "agent_status",
+        agent: "memory",
+        status: "error",
+        task: "Tool: search_memory",
+        activity: message,
+        at: now(),
+      })
+      return ""
+    }
+
     const assistantMessage: ChatMessage = { role: "assistant", content: first.content, tool_calls: first.toolCalls }
     const toolMessages: ChatMessage[] = []
     let toolFailed = false
     let matchCount = 0
 
-    // One tool round only: every tool_call in this first response is validated and
-    // executed here; the follow-up call cannot request further tool execution.
-    for (const call of first.toolCalls) {
-      const fn = (call as { function?: { name?: string; arguments?: string } }).function
-      if (!fn || fn.name !== TOOL_NAME) {
-        toolFailed = true
-        const message = `Neznámý nástroj: ${fn?.name ?? "?"}`
-        emit({ type: "agent_error", agent: "memory", message, attempts: 1, at: now() })
-        toolMessages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: message }) })
-        continue
-      }
+    // Exactly one tool call may enter this execution round.
+    const call = first.toolCalls[0]
+    const fn = call.function
+    if (fn.name !== TOOL_NAME) {
+      toolFailed = true
+      const message = `Neznámý nebo nepovolený nástroj: ${fn.name}`
+      emit({ type: "agent_error", agent: "memory", message, attempts: first.attempts, at: now() })
+      emit({
+        type: "agent_status",
+        agent: "memory",
+        status: "error",
+        task: "Tool: search_memory",
+        activity: message,
+        at: now(),
+      })
+      toolMessages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: message }) })
+    } else {
       try {
-        const outcome = executeSearchMemory(body.memories, fn.arguments ?? "")
-        matchCount += outcome.matches
+        const outcome = executeSearchMemory(body.memories, fn.arguments)
+        matchCount = outcome.matches
         emit({
           type: "agent_status",
           agent: "memory",
@@ -241,20 +320,32 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
         toolMessages.push({ role: "tool", tool_call_id: call.id, content: outcome.content })
       } catch (error) {
         toolFailed = true
-        const message = error instanceof ToolError ? error.message : "Nástroj selhal."
-        emit({ type: "agent_error", agent: "memory", message, attempts: 1, at: now() })
+        const message = error instanceof ToolError ? error.message : "Nástroj search_memory selhal."
+        emit({ type: "agent_error", agent: "memory", message, attempts: first.attempts, at: now() })
+        emit({
+          type: "agent_status",
+          agent: "memory",
+          status: "error",
+          task: "Tool: search_memory",
+          activity: message,
+          at: now(),
+        })
         toolMessages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: message }) })
       }
+    }
+
+    if (toolFailed) {
+      return ""
     }
 
     const finalUser = `${user}\n\nNyní vrať pouze JSON ve tvaru {"context": "..."} – nástroj už znovu nevolat.`
     const finalMessages: ChatMessage[] = [
       { role: "system", content: system },
-      { role: "user", content: user },
+      { role: "user", content: finalUser },
       assistantMessage,
       ...toolMessages,
     ]
-    const reserveSecond = reserveCallBudget(system + finalUser + JSON.stringify(toolMessages), 500, toolModel)
+    const reserveSecond = reserveCallBudget(toolModel, finalMessages, 500, false, true)
     if (!reserveSecond) {
       budgetStopped = true
       emit({
@@ -273,8 +364,8 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
           maxTokens: 500,
           reasoning: false,
           jsonMode: true,
-          tools: [SEARCH_MEMORY_TOOL],
-          toolChoice: "none",
+          tools: undefined,
+          toolChoice: undefined,
           signal,
         },
         (value) => memoryToolContextSchema.parse(value),
@@ -310,6 +401,14 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
         agent: "memory",
         message,
         attempts: (error as { attempts?: number }).attempts ?? 1,
+        at: now(),
+      })
+      emit({
+        type: "agent_status",
+        agent: "memory",
+        status: "error",
+        task: "Tool: search_memory",
+        activity: message,
         at: now(),
       })
       if (error instanceof DeepSeekError && error.fatal) {
@@ -353,7 +452,13 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
   }`
   const planSys = plannerSystem(body.mode, available, limit)
   const planMax = maxTokensFor(body, "plan")
-  const planReservation = body.enabledAgents.length ? reserveCallBudget(planSys + planUser, planMax) : undefined
+  const planMessages: ChatMessage[] = [
+    { role: "system", content: planSys },
+    { role: "user", content: planUser },
+  ]
+  const planReservation = body.enabledAgents.length
+    ? reserveCallBudget(body.model, planMessages, planMax, body.reasoning, true)
+    : undefined
 
   if (body.enabledAgents.length === 0) {
     rationale = "Všichni specialisté jsou vypnutí v nastavení – odpovídá pouze orchestrátor."
@@ -427,7 +532,11 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
       prior.length ? `\n\nVýstupy ostatních agentů:\n${formatOutputs(Object.fromEntries(prior.map((id) => [id, outputs[id]])))}` : ""
     }`
     const maxOut = maxTokensFor(body, "specialist")
-    const reservation = reserveCallBudget(system + user, maxOut)
+    const specialistMessages: ChatMessage[] = [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ]
+    const reservation = reserveCallBudget(body.model, specialistMessages, maxOut, body.reasoning, true)
 
     if (!reservation) {
       budgetStopped = true
@@ -508,7 +617,11 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
     }`
     const maxOut = maxTokensFor(body, "final")
     let result: FinalAnswer | undefined
-    const finalReservation = reserveCallBudget(system + user, maxOut)
+    const finalMessages: ChatMessage[] = [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ]
+    const finalReservation = reserveCallBudget(body.model, finalMessages, maxOut, body.reasoning, true)
 
     if (finalReservation) {
       try {
