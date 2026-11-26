@@ -1,7 +1,12 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
-import { DEVELOPMENT_AGENTS, createDevelopmentPlan, type DevelopmentPlan } from "@/lib/jarvis/development-studio"
+import {
+  DEVELOPMENT_AGENTS,
+  createDevelopmentPlan,
+  type DevelopmentPlan,
+  type DevelopmentStudioEvent,
+} from "@/lib/jarvis/development-studio"
 import type { PublicGitHubRepository } from "@/lib/github/public-repository"
 
 export function DevelopmentStudioScreen() {
@@ -9,10 +14,13 @@ export function DevelopmentStudioScreen() {
   const [task, setTask] = useState("")
   const [repository, setRepository] = useState<PublicGitHubRepository | null>(null)
   const [plan, setPlan] = useState<DevelopmentPlan | null>(null)
+  const [mockEvents, setMockEvents] = useState<DevelopmentStudioEvent[]>([])
   const [busy, setBusy] = useState(false)
+  const [mockBusy, setMockBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const loadAbortRef = useRef<AbortController | null>(null)
   const loadRequestRef = useRef(0)
+  const mockIdempotencyRef = useRef<string | null>(null)
   useEffect(() => () => {
     loadRequestRef.current += 1
     loadAbortRef.current?.abort()
@@ -32,6 +40,8 @@ export function DevelopmentStudioScreen() {
     loadAbortRef.current = controller
     setRepository(null)
     setPlan(null)
+    setMockEvents([])
+    mockIdempotencyRef.current = null
     setBusy(true)
     setError(null)
     setPlan(null)
@@ -61,8 +71,33 @@ export function DevelopmentStudioScreen() {
     }
     try {
       setPlan(createDevelopmentPlan(repository, task))
+      setMockEvents([])
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Plán nelze připravit.")
+    }
+  }
+
+  const startMockRun = async () => {
+    if (!repository || !plan) return
+    setError(null)
+    setMockEvents([])
+    setMockBusy(true)
+    const idempotencyKey = mockIdempotencyRef.current ?? crypto.randomUUID()
+    mockIdempotencyRef.current = idempotencyKey
+    try {
+      const response = await fetch("/api/development-studio/runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idempotencyKey, repository: repository.fullName, task }),
+      })
+      const body = await response.json() as { events?: DevelopmentStudioEvent[]; error?: string }
+      if (!response.ok || !body.events) throw new Error(body.error ?? "Mock průchod nelze spustit.")
+      setMockEvents(body.events)
+      mockIdempotencyRef.current = null
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Mock průchod nelze spustit.")
+    } finally {
+      setMockBusy(false)
     }
   }
 
@@ -72,8 +107,8 @@ export function DevelopmentStudioScreen() {
         <p className="font-mono text-[10px] uppercase tracking-[0.3em] text-primary">Development Studio</p>
         <h2 className="text-xl font-semibold tracking-tight">Osm vývojových specializací</h2>
         <p className="text-sm leading-relaxed text-muted-foreground">
-          Načítá pouze veřejná metadata GitHub repozitáře. Tato etapa připraví kontrolní plán; AI agenti zatím nespouštějí
-          model, neupravují repozitář ani nevytvářejí Pull Request.
+          Načítá pouze veřejná metadata GitHub repozitáře. Server může uložit audit bezpečného mock průchodu;
+          skutečné modely, executor, změny repozitáře ani Pull Requesty zatím nejsou aktivní.
         </p>
       </header>
 
@@ -85,6 +120,7 @@ export function DevelopmentStudioScreen() {
               id="development-repository"
               required
               maxLength={140}
+              disabled={mockBusy}
               autoCapitalize="none"
               autoCorrect="off"
               spellCheck={false}
@@ -96,12 +132,14 @@ export function DevelopmentStudioScreen() {
                 setBusy(false)
                 setRepository(null)
                 setPlan(null)
+                setMockEvents([])
+                mockIdempotencyRef.current = null
                 setError(null)
               }}
               placeholder="vlastník/název"
               className="min-h-12 min-w-0 flex-1 rounded-xl border border-input bg-background px-3 text-base outline-none focus:border-primary"
             />
-            <button type="submit" disabled={busy} className="min-h-12 rounded-xl bg-primary px-4 font-medium text-primary-foreground disabled:opacity-50">
+            <button type="submit" disabled={busy || mockBusy} className="min-h-12 rounded-xl bg-primary px-4 font-medium text-primary-foreground disabled:opacity-50">
               {busy ? "Načítám…" : "Načíst"}
             </button>
           </div>
@@ -146,12 +184,18 @@ export function DevelopmentStudioScreen() {
           required
           minLength={8}
           maxLength={2000}
+          disabled={mockBusy}
           value={task}
-          onChange={(event) => setTask(event.target.value)}
+          onChange={(event) => {
+            setTask(event.target.value)
+            setPlan(null)
+            setMockEvents([])
+            mockIdempotencyRef.current = null
+          }}
           placeholder="Popište změnu a očekávaný výsledek…"
           className="min-h-24 w-full rounded-xl border border-input bg-background p-3 text-base outline-none focus:border-primary"
         />
-        <button type="submit" disabled={!repository} className="min-h-11 rounded-xl bg-secondary px-4 text-sm font-medium disabled:opacity-50">
+        <button type="submit" disabled={!repository || mockBusy} className="min-h-11 rounded-xl bg-secondary px-4 text-sm font-medium disabled:opacity-50">
           Připravit kontrolní plán
         </button>
       </form>
@@ -171,9 +215,33 @@ export function DevelopmentStudioScreen() {
         })}
       </div>
       {plan && (
-        <p role="status" className="rounded-xl border border-warning/40 bg-warning/5 p-3 text-sm text-muted-foreground">
-          Plán pro <strong>{plan.repository}</strong> je pouze lokální příprava. Je potřeba ještě bezpečný izolovaný runner a schválené AI rozpočty; žádná externí změna nebyla provedena.
-        </p>
+        <div className="space-y-3 rounded-xl border border-warning/40 bg-warning/5 p-3 text-sm text-muted-foreground">
+          <p role="status">
+            Plán pro <strong>{plan.repository}</strong> zatím nevykonává změny. Bezpečný mock pouze ověří serverové řízení osmi rolí;
+            nevolá model, nečte zdrojový kód, nespouští příkazy a zapisuje pouze stavové události.
+          </p>
+          <button
+            type="button"
+            disabled={mockBusy}
+            onClick={startMockRun}
+            className="min-h-11 rounded-xl border border-warning/50 px-4 font-medium disabled:opacity-50"
+          >
+            {mockBusy ? "Ověřuji mock…" : "Ověřit bezpečný mock průchod"}
+          </button>
+          {mockEvents.length > 0 && (
+            <ol aria-label="Události bezpečného mock průchodu" className="space-y-1 border-t border-border/70 pt-3">
+              {mockEvents.map((item) => {
+                const agentName = DEVELOPMENT_AGENTS.find((agent) => agent.id === item.agentId)?.name ?? "Executor"
+                return (
+                  <li key={item.id} className="flex flex-wrap justify-between gap-2">
+                    <span>{agentName}: {item.event.replaceAll("_", " ")}</span>
+                    <span className="font-mono text-xs">{item.detailCode}</span>
+                  </li>
+                )
+              })}
+            </ol>
+          )}
+        </div>
       )}
     </section>
   )

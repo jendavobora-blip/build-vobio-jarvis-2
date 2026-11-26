@@ -8,13 +8,17 @@ import {
   consumeSharedRateLimit,
   createAccountInvite,
   createApproval,
+  DevelopmentStudioIdempotencyConflictError,
   findAccountForLogin,
   getDailyUsage,
   installDatabaseAdapterForTesting,
   isActiveAccount,
+  listDevelopmentStudioEvents,
+  listDevelopmentStudioRuns,
   listMemories,
   listApprovalAudit,
   listOrchestrationAudit,
+  persistDevelopmentStudioMockRun,
   recordOrchestrationAuditEvent,
   redeemAccountInvite,
   reserveDailyBudget,
@@ -27,6 +31,7 @@ import {
 import { encryptText } from "../lib/server/auth"
 import { approvalHash } from "../lib/server/approvals"
 import { preserveUsageForSettlement, settleBudgetUsage } from "../lib/server/usage-settlement"
+import { createMockDevelopmentStudioRun } from "../lib/jarvis/development-studio"
 
 const connectionString = process.env.JARVIS_TEST_DATABASE_URL
 if (!connectionString) throw new Error("Nastavte JARVIS_TEST_DATABASE_URL na izolovaný testovací PostgreSQL.")
@@ -370,4 +375,62 @@ test("PostgreSQL unknown usage conservatively accounts the reservation instead o
   assert.equal(Number(reservation.rows[0]?.reserved_usd), 0.02)
   assert.equal(reservation.rows[0]?.usage_uncertain, true)
   assert.ok(Math.abs((await getDailyUsage()).costUsd - before.costUsd - 0.02) < 1e-9)
+})
+
+test("PostgreSQL stores mock Studio events atomically and isolates tenant and user history", async () => {
+  const task = "Add a safe development history"
+  const createRun = (id: string) => createMockDevelopmentStudioRun({
+    id,
+    repository: "octocat/hello-world",
+    task,
+    taskHash: createHash("sha256").update(task).digest("hex"),
+  })
+  const ownerRun = await createRun(randomUUID())
+  const ownerIdempotencyKey = randomUUID()
+  const firstWrite = await persistDevelopmentStudioMockRun(owner, owner, ownerIdempotencyKey, ownerRun)
+  assert.deepEqual(firstWrite, { runId: ownerRun.id, created: true })
+  const replay = await persistDevelopmentStudioMockRun(owner, owner, ownerIdempotencyKey, await createRun(randomUUID()))
+  assert.deepEqual(replay, { runId: ownerRun.id, created: false })
+  await assert.rejects(
+    persistDevelopmentStudioMockRun(owner, owner, ownerIdempotencyKey, await createMockDevelopmentStudioRun({
+      id: randomUUID(),
+      repository: "octocat/hello-world",
+      task: "A different task body",
+      taskHash: createHash("sha256").update("A different task body").digest("hex"),
+    })),
+    DevelopmentStudioIdempotencyConflictError,
+  )
+  const memberIdempotencyKey = randomUUID()
+  const concurrentWrites = await Promise.all([
+    persistDevelopmentStudioMockRun(owner, member, memberIdempotencyKey, await createRun(randomUUID())),
+    persistDevelopmentStudioMockRun(owner, member, memberIdempotencyKey, await createRun(randomUUID())),
+  ])
+  assert.equal(concurrentWrites[0]?.runId, concurrentWrites[1]?.runId)
+  assert.equal(concurrentWrites.filter((result) => result.created).length, 1)
+
+  const ownerHistory = await listDevelopmentStudioRuns(owner, owner)
+  const memberHistory = await listDevelopmentStudioRuns(owner, member)
+  assert.deepEqual(ownerHistory.map((run) => run.id), [ownerRun.id])
+  assert.deepEqual(memberHistory.map((run) => run.id), [concurrentWrites[0]!.runId])
+  assert.deepEqual(await listDevelopmentStudioRuns(member, member), [])
+  const ownerEvents = await listDevelopmentStudioEvents(owner, owner, ownerRun.id)
+  assert.equal(ownerEvents.length, 19)
+  assert.deepEqual(ownerEvents.map((event) => event.sequence), Array.from({ length: 19 }, (_, index) => index))
+  assert.deepEqual(await listDevelopmentStudioEvents(member, member, ownerRun.id), [])
+  assert.equal(
+    (await pool.query("SELECT count(*)::int AS count FROM jarvis_development_studio_events WHERE run_id = $1", [ownerRun.id])).rows[0]?.count,
+    19,
+  )
+  assert.equal(
+    (await pool.query("SELECT count(*)::int AS count FROM jarvis_development_studio_runs WHERE task_hash = $1", [ownerRun.taskHash])).rows[0]?.count,
+    2,
+  )
+  assert.equal(
+    (await pool.query("SELECT count(*)::int AS count FROM information_schema.columns WHERE table_name = 'jarvis_development_studio_runs' AND column_name = 'task'")).rows[0]?.count,
+    0,
+  )
+  assert.equal(
+    (await pool.query("SELECT count(*)::int AS count FROM jarvis_development_studio_events WHERE run_id = $1", [concurrentWrites[0]!.runId])).rows[0]?.count,
+    19,
+  )
 })
