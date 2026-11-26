@@ -14,12 +14,15 @@ same budget proxy and is limited to one response with 16 output tokens.
 
 The coding job routes Aider through a loopback-only proxy. The proxy accepts
 only `deepseek-flash`, non-streaming requests, one response per request, bounded
-request size, bounded output tokens, and at most 40 calls. It reserves a
-worst-case amount before each request, includes the entire serialized request
-and output limit, applies a 2x safety factor, and settles against provider usage.
-Provider errors, missing usage, exhausted budgets, and unverified actual usage
-consume the full reservation and stop the run. The proxy gives Aider a
-short-lived local token; the actual DeepSeek key is not passed to Aider.
+request size, and at most 40 calls. It normalizes output limits to a single
+`max_tokens` value capped at 4096 (using 4096 when Aider omits a limit), then
+reserves against that forwarded limit. It includes the entire serialized
+request and output limit, applies a 2x safety factor, and settles against
+provider usage. Once a request is reserved, provider errors, missing usage,
+and unverified actual usage consume the full reservation and stop the run.
+Requests rejected before reservation are not forwarded and are recorded as a
+failed run without an API charge. The proxy gives Aider a short-lived local
+token; the actual DeepSeek key is not passed to Aider.
 
 The reserve calculation uses the official peak, uncached `deepseek-flash`
 rates checked on 2026-11-26: USD 0.30 per million input tokens and USD 1.20 per
@@ -32,8 +35,7 @@ cannot constrain other clients using the same API account concurrently.
 The audit artifact contains the per-run USD ceiling, actual USD charges or
 conservative reservations, request counts, denied calls, token usage, failure
 state, and whether reservations settled. It excludes prompts, API keys, and
-account balance amounts. Rejected or failed requests are conservatively counted
-at their reservation. The workflow fails on API errors, no diff, disallowed
+account balance amounts. The workflow fails on API errors, no diff, disallowed
 files, test failures, audit failures, or PR creation failures. Tests and PR
 creation finish before any proposal is available for owner review. There is no
 auto-merge, production deployment, or automatic follow-up run.
