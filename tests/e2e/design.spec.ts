@@ -27,6 +27,21 @@ test("project selection and demo run do not call the live chat API", async ({ pa
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
 })
 
+test("iPhone viewport allows zoom and keeps key screens within the viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 812 })
+  await page.goto("/")
+
+  const viewport = await page.locator('meta[name="viewport"]').getAttribute("content") ?? ""
+  expect(viewport).toContain("width=device-width")
+  expect(viewport).toContain("viewport-fit=cover")
+  expect(viewport).not.toMatch(/maximum-scale\s*=\s*1(?:\.0+)?|user-scalable\s*=\s*no/i)
+
+  for (const screen of ["Agenti", "Schválení", "Nastavení"]) {
+    await page.getByRole("button", { name: screen, exact: true }).click()
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  }
+})
+
 test("memory search filters persisted local items by content", async ({ page }) => {
   await page.goto("/")
   await page.getByRole("button", { name: "Paměť", exact: true }).click()

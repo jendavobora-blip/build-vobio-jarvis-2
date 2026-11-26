@@ -51,6 +51,7 @@ Tento soubor zachycuje skutečný stav větve PR #1. **Aplikace není dokončena
 
 ## Testování a pokračování
 
+- [x] Odstraněno omezení zvětšení stránky z viewport meta tagu; E2E test pro šířku 375 px ověřuje dostupné přiblížení a absenci vodorovného přetečení na obrazovkách Agenti, Schválení a Nastavení. Zbývá ověřit ovládání a výkon na skutečném iPhonu/Safari.
 - [~] `pnpm test`, `pnpm test:integration`, `JARVIS_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/jarvis_test pnpm test:db`, `pnpm typecheck`, `pnpm build` a `pnpm test:e2e` jsou k dispozici. E2E zahrnuje cross-origin odmítnutí. Izolované PostgreSQL 16 ověřuje migrační obnovu, izolaci, jednorázové pozvánky, rate limiting a finanční rezervace. Stále chybí skutečný multi-instance Vercel DB test, reálné iPhone testy, E2E pozvaného účtu s DB a ověření FPS/spotřeby.
 - [x] Copilot Code Review: workflow guard detekuje staged i unstaged `.github/workflows` změny; výsledek běhu je viditelný v obrazovce Tok; nepodporovaný hlasový vstup přejde na fokusovaný textový kompozitor. Akceptace: unit test workflow guardu a 2 Playwright scénáře.
 - [ ] Po každé změně zkontrolovat skutečné Preview deploymenty i chování aplikace; stav „build passed“ sám nestačí.
