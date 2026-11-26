@@ -4,23 +4,28 @@ import { after, test } from "node:test"
 import { Pool, type PoolClient } from "pg"
 import {
   clearDatabaseAdapterForTesting,
+  consumeApproval,
   consumeSharedRateLimit,
   createAccountInvite,
+  createApproval,
   findAccountForLogin,
   getDailyUsage,
   installDatabaseAdapterForTesting,
   isActiveAccount,
   listMemories,
+  listApprovalAudit,
   listOrchestrationAudit,
   recordOrchestrationAuditEvent,
   redeemAccountInvite,
   reserveDailyBudget,
+  resolveApproval,
   restoreOwnerMemoriesFromBackup,
   settleDailyBudget,
   setAccountActive,
   upsertMemory,
 } from "../lib/server/db"
 import { encryptText } from "../lib/server/auth"
+import { approvalHash } from "../lib/server/approvals"
 import { preserveUsageForSettlement, settleBudgetUsage } from "../lib/server/usage-settlement"
 
 const connectionString = process.env.JARVIS_TEST_DATABASE_URL
@@ -287,6 +292,51 @@ test("PostgreSQL rate limits and daily budget reservations are atomic under conc
     (await pool.query("SELECT count(*)::int AS count FROM jarvis_budget_reservations WHERE status = 'reserved' AND created_at < now() - interval '1 hour'")).rows[0]?.count,
     0,
   )
+})
+
+test("PostgreSQL approvals bind validated plans to the hash and consume exactly once", async () => {
+  const plan = {
+    target: "octocat/example",
+    action: "Prepare a pull request",
+    changes: ["Add a test"],
+    impacts: ["No production deployment"],
+    critical: true,
+  }
+  const id = randomUUID()
+  const hash = approvalHash(plan)
+  await assert.rejects(createApproval(owner, id, hash, JSON.stringify({ ...plan, action: "Deploy production" })), /otisk/i)
+  await assert.rejects(createApproval(owner, id, hash, JSON.stringify({ ...plan, extra: true })))
+  const created = await createApproval(owner, id, hash, JSON.stringify(plan))
+  assert.equal(created.status, "pending")
+  assert.equal(await resolveApproval(member, id, hash, "approve"), undefined)
+  assert.equal(await resolveApproval(owner, id, approvalHash({ ...plan, action: "Deploy production" }), "approve"), undefined)
+  assert.equal(await consumeApproval(owner, id, hash), undefined)
+  assert.equal((await resolveApproval(owner, id, hash, "approve"))?.status, "critical_reviewed")
+  assert.equal(await consumeApproval(owner, id, hash), undefined)
+  assert.equal((await resolveApproval(owner, id, hash, "confirm_critical"))?.status, "approved")
+  assert.equal(await consumeApproval(member, id, hash), undefined)
+  const attempts = await Promise.all(Array.from({ length: 10 }, () => consumeApproval(owner, id, hash)))
+  assert.deepEqual(attempts.filter((result) => result !== undefined), [JSON.stringify(plan)])
+  const audit = (await listApprovalAudit(owner)).filter((event) => event.approval_id === id)
+  assert.deepEqual(audit.map((event) => event.event).sort(), ["approved", "created", "critical_reviewed", "execution_authorized"])
+  assert.equal((await listApprovalAudit(member)).some((event) => event.approval_id === id), false)
+})
+
+test("PostgreSQL approval consumption fails closed when its audit write fails", async () => {
+  const plan = { target: "octocat/example", action: "Prepare", changes: ["Add test"], impacts: ["No production"], critical: false }
+  const id = randomUUID()
+  const hash = approvalHash(plan)
+  await createApproval(owner, id, hash, JSON.stringify(plan))
+  await resolveApproval(owner, id, hash, "approve")
+  await pool.query("ALTER TABLE jarvis_approval_audit ADD CONSTRAINT test_block_authorization CHECK (event <> 'execution_authorized') NOT VALID")
+  try {
+    await assert.rejects(consumeApproval(owner, id, hash))
+    const result = await pool.query("SELECT status FROM jarvis_approvals WHERE id = $1", [id])
+    assert.equal(result.rows[0]?.status, "approved")
+  } finally {
+    await pool.query("ALTER TABLE jarvis_approval_audit DROP CONSTRAINT test_block_authorization")
+  }
+  assert.equal(await consumeApproval(owner, id, hash), JSON.stringify(plan))
 })
 
 test("PostgreSQL settlement preserves actual cost and tokens when audit persistence fails", async () => {

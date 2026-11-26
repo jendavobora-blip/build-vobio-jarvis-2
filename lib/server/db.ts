@@ -3,6 +3,7 @@ import { neon } from "@neondatabase/serverless"
 import { createHash, randomUUID } from "node:crypto"
 import { serverConfig } from "./config"
 import { decryptText, encryptText, ownerId } from "./auth"
+import { approvalHash, approvalPlanSchema } from "./approvals"
 import type { AgentId, MemoryItem } from "@/lib/jarvis/types"
 
 type Sql = ReturnType<typeof neon>
@@ -378,11 +379,16 @@ export interface ApprovalRow {
 }
 
 export async function createApproval(ownerId: string, id: string, planHash: string, planJson: string): Promise<ApprovalRow> {
+  const plan = approvalPlanSchema.strict().parse(JSON.parse(planJson))
+  if (approvalHash(plan) !== planHash) {
+    throw new Error("Otisk schvalovacího plánu neodpovídá jeho obsahu.")
+  }
+  const canonicalPlanJson = JSON.stringify(plan)
   const sql = await db()
   if (!sql) throw new Error("Databáze není nastavena.")
   const rows = (await sql`WITH created AS (
     INSERT INTO jarvis_approvals (id, owner_id, plan_hash, plan_json, status)
-    VALUES (${id}, ${ownerId}, ${planHash}, ${planJson}, 'pending')
+    VALUES (${id}, ${ownerId}, ${planHash}, ${canonicalPlanJson}, 'pending')
     ON CONFLICT (id) DO NOTHING
     RETURNING *
   ), logged AS (
