@@ -93,27 +93,49 @@ def verify_balance(api_key: str, limit: Decimal | None = None) -> Decimal:
     return parse_balance(payload, limit)
 
 
+def normalize_request_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise BudgetError("Tělo API požadavku musí být objekt.")
+    normalized = dict(payload)
+    requested_limits = [
+        normalized[field]
+        for field in ("max_tokens", "max_completion_tokens")
+        if field in normalized
+    ]
+    for value in requested_limits:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise BudgetError("Výstupní limit tokenů musí být kladné celé číslo.")
+    max_tokens = min(requested_limits, default=MAX_OUTPUT_TOKENS)
+    normalized.pop("max_completion_tokens", None)
+    normalized["max_tokens"] = min(max_tokens, MAX_OUTPUT_TOKENS)
+    return normalized
+
+
 def estimate_cost(raw_body: bytes, payload: Any) -> Decimal:
     if len(raw_body) > MAX_BODY_BYTES:
         raise BudgetError("Požadavek překračuje maximální velikost.")
-    if not isinstance(payload, dict):
-        raise BudgetError("Tělo API požadavku musí být objekt.")
-    model = payload.get("model")
+    normalized = normalize_request_payload(payload)
+    serialized_payload = json.dumps(normalized, separators=(",", ":")).encode("utf-8")
+    if len(serialized_payload) > MAX_BODY_BYTES:
+        raise BudgetError("Normalizovaný požadavek překračuje maximální velikost.")
+    model = normalized.get("model")
     if model not in ("deepseek-flash", "deepseek/deepseek-flash"):
         raise BudgetError("Povolen je pouze model deepseek-flash.")
-    if payload.get("stream", False) is not False:
+    if normalized.get("stream", False) is not False:
         raise BudgetError("Streamované odpovědi nejsou rozpočtovým proxy podporovány.")
-    count = payload.get("n", 1)
+    count = normalized.get("n", 1)
     if isinstance(count, bool) or not isinstance(count, int) or count != 1:
         raise BudgetError("Požadavek musí vytvářet právě jednu odpověď.")
-    messages = payload.get("messages")
+    messages = normalized.get("messages")
     if not isinstance(messages, list) or not messages or not all(isinstance(item, dict) for item in messages):
         raise BudgetError("Požadavek musí obsahovat platné zprávy.")
-    max_tokens = payload.get("max_tokens", payload.get("max_completion_tokens"))
-    if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or not 1 <= max_tokens <= MAX_OUTPUT_TOKENS:
-        raise BudgetError("Výstupní limit tokenů chybí nebo překračuje povolené maximum.")
+    max_tokens = normalized["max_tokens"]
 
-    prompt_token_upper_bound = len(raw_body) + PROMPT_TOKEN_OVERHEAD + PER_MESSAGE_TOKEN_OVERHEAD * len(messages)
+    prompt_token_upper_bound = (
+        max(len(raw_body), len(serialized_payload))
+        + PROMPT_TOKEN_OVERHEAD
+        + PER_MESSAGE_TOKEN_OVERHEAD * len(messages)
+    )
     return (
         Decimal(prompt_token_upper_bound) * INPUT_USD_PER_MILLION_TOKENS
         + Decimal(max_tokens) * OUTPUT_USD_PER_MILLION_TOKENS
@@ -237,7 +259,7 @@ def create_handler(ledger: BudgetLedger, api_key: str, local_token: str):
                 if length < 1 or length > MAX_BODY_BYTES:
                     raise BudgetError("Neplatná velikost požadavku.")
                 raw_body = self.rfile.read(length)
-                payload = json.loads(raw_body)
+                payload = normalize_request_payload(json.loads(raw_body))
                 reservation = estimate_cost(raw_body, payload)
                 reservation_id = ledger.reserve(reservation)
             except (ValueError, json.JSONDecodeError, BudgetError):

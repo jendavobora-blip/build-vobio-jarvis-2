@@ -11,6 +11,7 @@ from deepseek_budget_proxy import (
     BudgetError,
     BudgetLedger,
     estimate_cost,
+    normalize_request_payload,
     parse_balance,
     parse_usd,
     run_aider,
@@ -82,11 +83,35 @@ class BudgetProxyTests(unittest.TestCase):
             {**base, "stream": True},
             {**base, "n": 2},
             {**base, "n": True},
-            {**base, "max_tokens": 4097},
+            {**base, "max_tokens": 0},
+            {**base, "max_tokens": True},
+            {**base, "max_completion_tokens": 0},
         ]
         for payload in cases:
             with self.subTest(payload=payload), self.assertRaises(BudgetError):
                 estimate_cost(json.dumps(payload).encode(), payload)
+
+    def test_request_clamps_aider_output_to_the_proxy_limit(self):
+        base = {
+            "model": "deepseek/deepseek-flash",
+            "messages": [{"role": "user", "content": "test"}],
+            "stream": False,
+        }
+        cases = [
+            ({**base, "max_tokens": 16_384}, 4096),
+            ({**base, "max_completion_tokens": 16_384}, 4096),
+            ({**base, "max_tokens": 16, "max_completion_tokens": 8_192}, 16),
+            (base, 4096),
+        ]
+        for payload, expected in cases:
+            with self.subTest(payload=payload):
+                normalized = normalize_request_payload(payload)
+                self.assertEqual(normalized["max_tokens"], expected)
+                self.assertNotIn("max_completion_tokens", normalized)
+                self.assertGreater(
+                    estimate_cost(json.dumps(payload).encode(), payload),
+                    Decimal(expected) * Decimal("1.20") / Decimal(1_000_000),
+                )
 
     def test_reservations_stop_concurrent_calls_from_exceeding_limit(self):
         ledger = BudgetLedger(Decimal("0.01"))
@@ -205,6 +230,42 @@ class BudgetProxyTests(unittest.TestCase):
             snapshot = ledger.snapshot()
             self.assertTrue(snapshot["failed"])
             self.assertTrue(snapshot["all_reservations_settled"])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_proxy_clamps_aider_output_before_forwarding(self):
+        server, _thread = start_proxy(Decimal("0.02"), "provider-secret", "local-token")
+        try:
+            response_body = json.dumps({
+                "choices": [{"message": {"content": "OK"}}],
+                "usage": {"prompt_tokens": 50, "completion_tokens": 2},
+            }).encode()
+            with patch(
+                "deepseek_budget_proxy.urllib.request.urlopen",
+                return_value=FakeResponse(response_body),
+            ) as upstream:
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+                body = json.dumps({
+                    "model": "deepseek/deepseek-flash",
+                    "messages": [{"role": "user", "content": "test"}],
+                    "max_tokens": 16_384,
+                    "stream": False,
+                })
+                connection.request(
+                    "POST",
+                    "/chat/completions",
+                    body,
+                    {"Authorization": "Bearer local-token", "Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                connection.close()
+
+            forwarded = json.loads(upstream.call_args.args[0].data)
+            self.assertEqual(forwarded["max_tokens"], 4096)
+            self.assertNotIn("max_completion_tokens", forwarded)
+            self.assertEqual(server.ledger.snapshot()["api_calls"], 1)
         finally:
             server.shutdown()
             server.server_close()
