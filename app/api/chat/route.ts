@@ -15,7 +15,7 @@ import { DeepSeekError } from "@/lib/server/deepseek"
 import { SPECIALISTS } from "@/lib/jarvis/agents"
 import type { ChatRequestBody, RunEvent } from "@/lib/jarvis/types"
 import { hasValidRequestOrigin } from "@/lib/server/request-security"
-import { preserveUsageForSettlement } from "@/lib/server/usage-settlement"
+import { preserveUsageForSettlement, settleBudgetUsage } from "@/lib/server/usage-settlement"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -177,7 +177,7 @@ export async function POST(request: Request) {
       } finally {
         clearInterval(heartbeat)
         try {
-          await settleDailyBudget(reservationId, spent.costUsd, spent.tokens)
+          await settleBudgetUsage(reservationId, spent, settleDailyBudget)
         } catch (error) {
           console.error("[jarvis] budget settlement failed", error instanceof Error ? error.message : "unknown error")
         }

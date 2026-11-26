@@ -3,6 +3,8 @@ export interface SettledUsage {
   tokens: number
 }
 
+export type BudgetSettler = (reservationId: string, costUsd: number, tokens: number) => Promise<void>
+
 interface UsageLike {
   costUsd?: unknown
   promptTokens?: unknown
@@ -34,4 +36,12 @@ export function preserveUsageForSettlement(current: SettledUsage, error: unknown
     costUsd: Math.max(current.costUsd, costUsd),
     tokens: Math.max(current.tokens, tokens),
   }
+}
+
+export async function settleBudgetUsage(
+  reservationId: string,
+  usage: SettledUsage,
+  settle: BudgetSettler,
+): Promise<void> {
+  await settle(reservationId, usage.costUsd, usage.tokens)
 }

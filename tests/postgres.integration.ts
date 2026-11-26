@@ -21,7 +21,7 @@ import {
   upsertMemory,
 } from "../lib/server/db"
 import { encryptText } from "../lib/server/auth"
-import { preserveUsageForSettlement } from "../lib/server/usage-settlement"
+import { preserveUsageForSettlement, settleBudgetUsage } from "../lib/server/usage-settlement"
 
 const connectionString = process.env.JARVIS_TEST_DATABASE_URL
 if (!connectionString) throw new Error("Nastavte JARVIS_TEST_DATABASE_URL na izolovaný testovací PostgreSQL.")
@@ -297,7 +297,7 @@ test("PostgreSQL settlement preserves actual cost and tokens when audit persiste
   })
   const usage = preserveUsageForSettlement({ costUsd: 0, tokens: 0 }, auditFailure)
 
-  await settleDailyBudget(reservationId, usage.costUsd, usage.tokens)
+  await settleBudgetUsage(reservationId, usage, settleDailyBudget)
   const after = await getDailyUsage()
 
   assert.ok(after.costUsd - before.costUsd >= usage.costUsd - 1e-9)
