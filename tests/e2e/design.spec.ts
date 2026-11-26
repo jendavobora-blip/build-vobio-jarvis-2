@@ -36,10 +36,54 @@ test("iPhone viewport allows zoom and keeps key screens within the viewport", as
   expect(viewport).toContain("viewport-fit=cover")
   expect(viewport).not.toMatch(/maximum-scale\s*=\s*1(?:\.0+)?|user-scalable\s*=\s*no/i)
 
-  for (const screen of ["Agenti", "Schválení", "Nastavení"]) {
+  for (const screen of ["Agenti", "Studio", "Schválení", "Nastavení"]) {
     await page.getByRole("button", { name: screen, exact: true }).click()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
   }
+})
+
+test("development studio reads a public repository and prepares an honest eight-role plan without execution", async ({ page }) => {
+  let liveRequests = 0
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/chat") liveRequests += 1
+  })
+  await page.route("**/api/github/repository**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        repository: {
+          fullName: "octocat/hello-world",
+          description: "A sample repository",
+          url: "https://github.com/octocat/hello-world",
+          defaultBranch: "main",
+          stars: 7,
+          openIssues: 2,
+          updatedAt: "2026-11-26T10:00:00Z",
+          commits: [{
+            sha: "1234567890abcdef1234567890abcdef12345678",
+            url: "https://github.com/octocat/hello-world/commit/1234567890abcdef1234567890abcdef12345678",
+            message: "Add example",
+            author: "octocat",
+            date: "2026-11-26T09:00:00Z",
+          }],
+        },
+      }),
+    })
+  })
+  await page.goto("/")
+  await page.getByRole("button", { name: "Studio", exact: true }).click()
+  await expect(page.getByRole("heading", { name: "Osm vývojových specializací" })).toBeVisible()
+  await page.getByLabel("Veřejný GitHub repozitář").fill("octocat/hello-world")
+  await page.getByRole("button", { name: "Načíst", exact: true }).click()
+  await expect(page.getByRole("heading", { name: "octocat/hello-world" })).toBeVisible()
+  await expect(page.getByRole("link", { name: "Add example" })).toBeVisible()
+  await page.getByLabel("Vývojové zadání").fill("Add accessible repository navigation")
+  await page.getByRole("button", { name: "Připravit kontrolní plán" }).click()
+  await expect(page.getByRole("heading", { name: "Architekt" })).toBeVisible()
+  await expect(page.getByRole("heading", { name: "Dokumentační koordinátor" })).toBeVisible()
+  await expect(page.getByRole("status")).toContainText("žádná externí změna nebyla provedena")
+  expect(liveRequests).toBe(0)
 })
 
 test("memory search filters persisted local items by content", async ({ page }) => {
