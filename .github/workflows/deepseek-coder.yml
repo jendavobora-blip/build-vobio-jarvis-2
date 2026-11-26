@@ -17,6 +17,11 @@ on:
         required: true
         type: boolean
         default: false
+      test_pripojeni:
+        description: Pouze jedno kratke testovaci volani DeepSeek API
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -51,8 +56,68 @@ jobs:
           print('Format Secretu DEEPSEEK_API_KEY pro HTTP hlavicku je platny.')
           PY
 
+  test_pripojeni:
+    if: ${{ inputs.povoluji_placene_api == true && inputs.test_pripojeni == true }}
+    needs: kontrola_klice
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Jedno kratke volani DeepSeek API
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import http.client
+          import json
+          import os
+
+          body = json.dumps({
+              'model': 'deepseek-flash',
+              'messages': [{'role': 'user', 'content': 'Reply OK.'}],
+              'max_tokens': 16,
+              'thinking': {'type': 'disabled'},
+              'stream': False,
+          })
+          connection = http.client.HTTPSConnection('api.deepseek.com', timeout=30)
+          try:
+              connection.request('POST', '/chat/completions', body, {
+                  'Authorization': 'Bearer ' + os.environ['DEEPSEEK_API_KEY'],
+                  'Content-Type': 'application/json',
+              })
+              response = connection.getresponse()
+              if response.status != 200:
+                  raise SystemExit(f'DeepSeek API vratilo HTTP {response.status}.')
+              raw = response.read(65537)
+              if len(raw) > 65536:
+                  raise SystemExit('DeepSeek API vratilo prilis velkou odpoved.')
+              result = json.loads(raw)
+              if not isinstance(result, dict):
+                  raise SystemExit('DeepSeek API vratilo neplatnou odpoved.')
+              choices = result.get('choices')
+              usage = result.get('usage')
+              if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                  raise SystemExit('DeepSeek API vratilo neplatnou odpoved.')
+              message = choices[0].get('message')
+              if not isinstance(message, dict) or not isinstance(message.get('content'), str) or not message['content'].strip():
+                  raise SystemExit('DeepSeek API vratilo neplatnou odpoved.')
+              if not isinstance(usage, dict) or not all(
+                  type(usage.get(name)) is int and usage[name] >= 0
+                  for name in ('prompt_tokens', 'completion_tokens')
+              ):
+                  raise SystemExit('DeepSeek API nevratilo platne udaje o spotrebe.')
+              print(
+                  f"Pripojeni OK; vstupni tokeny: {usage['prompt_tokens']}; "
+                  f"vystupni tokeny: {usage['completion_tokens']}."
+              )
+          except (OSError, http.client.HTTPException, ValueError):
+              raise SystemExit('DeepSeek API test selhal kvuli siti nebo neplatne odpovedi.') from None
+          finally:
+              connection.close()
+          PY
+
   programator:
-    if: ${{ inputs.povoluji_placene_api == true }}
+    if: ${{ inputs.povoluji_placene_api == true && inputs.test_pripojeni == false }}
     needs: kontrola_klice
     runs-on: ubuntu-latest
     timeout-minutes: 25
