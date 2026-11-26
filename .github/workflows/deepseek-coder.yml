@@ -54,15 +54,15 @@ jobs:
 
       - name: DeepSeek naprogramuje dalsi etapu
         env:
-          OPENAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          OPENAI_API_BASE: https://api.deepseek.com/v1
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DEEPSEEK_API_BASE: https://api.deepseek.com/v1
           AIDER_ENV_FILE: /dev/null
           TASK: ${{ inputs.task }}
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ -z "${OPENAI_API_KEY:-}" ]; then
+          if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
             echo "Chybi Secret DEEPSEEK_API_KEY" >&2
             exit 1
           fi
@@ -98,10 +98,11 @@ jobs:
           printf '\nUKOL:\n%s\n' "$TASK" >> /tmp/task.txt
 
           aider \
-            --model openai/deepseek-flash \
+            --model deepseek/deepseek-chat \
             --message-file /tmp/task.txt \
             --read AGENTS.md \
             --no-auto-commits \
+            --no-gitignore \
             --no-suggest-shell-commands \
             --no-auto-test \
             --no-auto-lint \
