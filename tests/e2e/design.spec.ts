@@ -114,6 +114,122 @@ test("studio clears stale repository and wraps long GitHub text on mobile", asyn
   await expect(page.getByRole("button", { name: "Připravit kontrolní plán" })).toBeDisabled()
 })
 
+test("studio history loads persisted mock events and clears them when access expires", async ({ page }) => {
+  const first = "00000000-0000-4000-8000-000000000001"
+  const second = "00000000-0000-4000-8000-000000000002"
+  let allowed = true
+  let releaseFirst!: () => void
+  let firstStarted!: () => void
+  let firstFinished!: () => void
+  const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve })
+  const firstSeen = new Promise<void>((resolve) => { firstStarted = resolve })
+  const firstDone = new Promise<void>((resolve) => { firstFinished = resolve })
+  await page.route("**/api/development-studio/runs**", async (route) => {
+    if (!allowed) {
+      await route.fulfill({ status: 401, json: { error: "Nejste přihlášeni." } })
+      return
+    }
+    const runId = new URL(route.request().url()).searchParams.get("runId")
+    if (!runId) {
+      await route.fulfill({ json: { runs: [first, second].map((id, index) => ({
+        id, repository: `octocat/repo-${index}`, mode: "mock_only", status: "blocked", created_at: "2026-11-26T10:00:00Z",
+      })) } })
+      return
+    }
+    if (runId === first) {
+      firstStarted()
+      await firstBlocked
+    }
+    await route.fulfill({ json: { events: [{
+      id: `${runId}:0`, runId, sequence: 0, agentId: runId === first ? "architect" : "qa",
+      event: "agent_mocked", detailCode: "mock_only", occurredAt: "2026-11-26T10:00:00Z",
+    }] } }).catch(() => {})
+    if (runId === first) firstFinished()
+  })
+  await page.setViewportSize({ width: 375, height: 812 })
+  await page.goto("/")
+  await page.getByRole("button", { name: "Studio", exact: true }).click()
+  await page.getByRole("button", { name: "Načíst historii" }).click()
+  await expect(page.getByText("octocat/repo-0")).toBeVisible()
+  const detail = page.getByRole("button", { name: "Zobrazit události" })
+  await detail.nth(0).click()
+  await firstSeen
+  await detail.nth(1).click()
+  const events = page.getByRole("list", { name: "Uložené události mock průchodu" })
+  await expect(events).toContainText("QA Engineer")
+  releaseFirst()
+  await firstDone
+  await expect(events).toContainText("QA Engineer")
+  await expect(events).not.toContainText("Project Architect")
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  allowed = false
+  await page.getByRole("button", { name: "Načíst historii" }).click()
+  await expect(page.locator('p[role="alert"]')).toContainText("Nejste přihlášeni")
+  await expect(page.getByText("octocat/repo-0")).toHaveCount(0)
+  await expect(events).toHaveCount(0)
+})
+
+test("studio history rejects unauthenticated access", async ({ page }) => {
+  await page.goto("/")
+  await page.getByRole("button", { name: "Studio", exact: true }).click()
+  await page.getByRole("button", { name: "Načíst historii" }).click()
+  await expect(page.locator('p[role="alert"]')).toContainText("Nejste přihlášeni")
+  await expect(page.getByRole("list", { name: "Uložené mock průchody" })).toHaveCount(0)
+})
+
+test("studio clears displayed history immediately on logout", async ({ page }) => {
+  let authenticated = true
+  await page.route("**/api/status", async (route) => route.fulfill({ json: {
+    deepseekConfigured: false, liveEnabled: false, authConfigured: true, authenticated,
+    userRole: "member", databaseConfigured: false,
+    limits: { maxRequestUsd: 0, maxRequestTokens: 0, dailyBudgetUsd: 0, runsPer10Min: 0 }, usageToday: null,
+  } }))
+  await page.route("**/api/auth", async (route) => {
+    authenticated = false
+    await route.fulfill({ json: { ok: true } })
+  })
+  await page.route("**/api/development-studio/runs**", async (route) => route.fulfill({ json: { runs: [{
+    id: "00000000-0000-4000-8000-000000000001", repository: "octocat/private-history", mode: "mock_only",
+    status: "blocked", created_at: "2026-11-26T10:00:00Z",
+  }] } }))
+  await page.goto("/")
+  await page.getByRole("button", { name: "Studio", exact: true }).click()
+  await page.getByRole("button", { name: "Načíst historii" }).click()
+  await expect(page.getByText("octocat/private-history")).toBeVisible()
+  await page.getByRole("button", { name: "Demo režim – otevřít nastavení" }).click()
+  await page.getByRole("button", { name: "Odhlásit se" }).click()
+  await expect(page.getByText("octocat/private-history")).toHaveCount(0)
+})
+
+test("studio clears previous account history when switching browser tabs", async ({ page, context }) => {
+  let scope = "account-a"
+  await context.route("**/api/status", async (route) => route.fulfill({ json: {
+    deepseekConfigured: false, liveEnabled: false, authConfigured: true, authenticated: true, accountScope: scope,
+    userRole: "member", databaseConfigured: false,
+    limits: { maxRequestUsd: 0, maxRequestTokens: 0, dailyBudgetUsd: 0, runsPer10Min: 0 }, usageToday: null,
+  } }))
+  await context.route("**/api/development-studio/runs**", async (route) => route.fulfill({ json: { runs: [{
+    id: "00000000-0000-4000-8000-000000000001", repository: `octocat/${scope}`, mode: "mock_only",
+    status: "blocked", created_at: "2026-11-26T10:00:00Z",
+  }] } }))
+  await context.route("**/api/auth", async (route) => {
+    scope = "account-b"
+    await route.fulfill({ json: { ok: true } })
+  })
+  await page.goto("/")
+  await page.getByRole("button", { name: "Studio", exact: true }).click()
+  await page.getByRole("button", { name: "Načíst historii" }).click()
+  await expect(page.getByText("octocat/account-a")).toBeVisible()
+  const otherTab = await context.newPage()
+  await otherTab.goto("/")
+  await otherTab.getByRole("button", { name: "Demo režim – otevřít nastavení" }).click()
+  await otherTab.getByRole("button", { name: "Odhlásit se" }).click()
+  await expect(page.getByText("octocat/account-a")).toHaveCount(0)
+  await page.getByRole("button", { name: "Načíst historii" }).click()
+  await expect(page.getByText("octocat/account-b")).toBeVisible()
+  await otherTab.close()
+})
+
 test("memory search filters persisted local items by content", async ({ page }) => {
   await page.goto("/")
   await page.getByRole("button", { name: "Paměť", exact: true }).click()

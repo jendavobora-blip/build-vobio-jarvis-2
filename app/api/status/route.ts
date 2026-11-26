@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto"
 import { authenticatedUser } from "@/lib/server/auth"
 import { serverConfig } from "@/lib/server/config"
 import { getDailyUsage, isDatabaseConfigured } from "@/lib/server/db"
@@ -14,6 +15,9 @@ export async function GET() {
     liveEnabled: serverConfig.liveEnabled,
     authConfigured: Boolean(serverConfig.accessCode && serverConfig.ownerId && serverConfig.sessionSecret && serverConfig.encryptionSecret),
     authenticated,
+    accountScope: user && serverConfig.sessionSecret
+      ? createHmac("sha256", serverConfig.sessionSecret).update(`status-scope:${user.ownerId}:${user.id}`).digest("base64url")
+      : undefined,
     userRole: user?.role,
     databaseConfigured: isDatabaseConfigured(),
     limits: {

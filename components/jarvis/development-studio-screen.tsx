@@ -8,8 +8,9 @@ import {
   type DevelopmentStudioEvent,
 } from "@/lib/jarvis/development-studio"
 import type { PublicGitHubRepository } from "@/lib/github/public-repository"
+import { DevelopmentStudioHistory } from "./development-studio-history"
 
-export function DevelopmentStudioScreen() {
+export function DevelopmentStudioScreen({ authRevision }: { authRevision: string }) {
   const [repositoryPath, setRepositoryPath] = useState("")
   const [task, setTask] = useState("")
   const [repository, setRepository] = useState<PublicGitHubRepository | null>(null)
@@ -243,6 +244,7 @@ export function DevelopmentStudioScreen() {
           )}
         </div>
       )}
+      <DevelopmentStudioHistory key={authRevision} />
     </section>
   )
 }
