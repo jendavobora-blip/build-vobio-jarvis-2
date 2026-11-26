@@ -86,6 +86,32 @@ test("development studio reads a public repository and prepares an honest eight-
   expect(liveRequests).toBe(0)
 })
 
+test("studio clears stale repository and wraps long GitHub text on mobile", async ({ page }) => {
+  const longName = "a".repeat(100)
+  await page.route("**/api/github/repository**", async (route) => {
+    await route.fulfill({ json: { repository: {
+      fullName: `octocat/${longName}`,
+      description: "b".repeat(500),
+      url: "https://github.com/octocat/example",
+      defaultBranch: "c".repeat(100),
+      stars: 0,
+      openIssues: 0,
+      updatedAt: "2026-11-26",
+      commits: [{ sha: "1".repeat(40), url: "https://github.com/octocat/example/commit/1", message: "d".repeat(240), author: "octocat", date: null }],
+    } } })
+  })
+  await page.setViewportSize({ width: 375, height: 812 })
+  await page.goto("/")
+  await page.getByRole("button", { name: "Studio", exact: true }).click()
+  await page.getByLabel("Veřejný GitHub repozitář").fill(`octocat/${longName}`)
+  await page.getByRole("button", { name: "Načíst", exact: true }).click()
+  await expect(page.getByRole("heading", { name: `octocat/${longName}` })).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.getByLabel("Veřejný GitHub repozitář").fill("octocat/other")
+  await expect(page.getByRole("heading", { name: `octocat/${longName}` })).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "Připravit kontrolní plán" })).toBeDisabled()
+})
+
 test("memory search filters persisted local items by content", async ({ page }) => {
   await page.goto("/")
   await page.getByRole("button", { name: "Paměť", exact: true }).click()

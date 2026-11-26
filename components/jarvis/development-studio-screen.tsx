@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { DEVELOPMENT_AGENTS, createDevelopmentPlan, type DevelopmentPlan } from "@/lib/jarvis/development-studio"
 import type { PublicGitHubRepository } from "@/lib/github/public-repository"
 
@@ -11,6 +11,12 @@ export function DevelopmentStudioScreen() {
   const [plan, setPlan] = useState<DevelopmentPlan | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const loadAbortRef = useRef<AbortController | null>(null)
+  const loadRequestRef = useRef(0)
+  useEffect(() => () => {
+    loadRequestRef.current += 1
+    loadAbortRef.current?.abort()
+  }, [])
 
   const loadRepository = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -20,20 +26,29 @@ export function DevelopmentStudioScreen() {
       return
     }
 
+    const requestId = ++loadRequestRef.current
+    loadAbortRef.current?.abort()
+    const controller = new AbortController()
+    loadAbortRef.current = controller
+    setRepository(null)
+    setPlan(null)
     setBusy(true)
     setError(null)
     setPlan(null)
     try {
       const params = new URLSearchParams({ owner, repo: name })
-      const response = await fetch(`/api/github/repository?${params}`, { cache: "no-store" })
+      const response = await fetch(`/api/github/repository?${params}`, { cache: "no-store", signal: controller.signal })
+      if (requestId !== loadRequestRef.current) return
       const body = (await response.json()) as { repository?: PublicGitHubRepository; error?: string }
+      if (requestId !== loadRequestRef.current) return
       if (!response.ok || !body.repository) throw new Error(body.error ?? "Repozitář nelze načíst.")
       setRepository(body.repository)
     } catch (reason) {
+      if (requestId !== loadRequestRef.current || controller.signal.aborted) return
       setRepository(null)
       setError(reason instanceof Error ? reason.message : "Repozitář nelze načíst.")
     } finally {
-      setBusy(false)
+      if (requestId === loadRequestRef.current) setBusy(false)
     }
   }
 
@@ -74,7 +89,15 @@ export function DevelopmentStudioScreen() {
               autoCorrect="off"
               spellCheck={false}
               value={repositoryPath}
-              onChange={(event) => setRepositoryPath(event.target.value)}
+              onChange={(event) => {
+                setRepositoryPath(event.target.value)
+                loadRequestRef.current += 1
+                loadAbortRef.current?.abort()
+                setBusy(false)
+                setRepository(null)
+                setPlan(null)
+                setError(null)
+              }}
               placeholder="vlastník/název"
               className="min-h-12 min-w-0 flex-1 rounded-xl border border-input bg-background px-3 text-base outline-none focus:border-primary"
             />
@@ -87,16 +110,16 @@ export function DevelopmentStudioScreen() {
         {repository && (
           <article className="rounded-xl border border-primary/20 bg-primary/5 p-3">
             <div className="flex flex-wrap items-start justify-between gap-2">
-              <div>
-                <h3 className="font-semibold">{repository.fullName}</h3>
-                <p className="mt-1 text-sm text-muted-foreground">{repository.description || "Repozitář nemá popis."}</p>
+              <div className="min-w-0">
+                <h3 className="min-w-0 break-all font-semibold">{repository.fullName}</h3>
+                <p className="[overflow-wrap:anywhere] mt-1 text-sm text-muted-foreground">{repository.description || "Repozitář nemá popis."}</p>
               </div>
-              <a href={repository.url} target="_blank" rel="noopener noreferrer" className="min-h-10 rounded-lg border border-border px-3 py-2 text-sm text-primary">
+              <a href={repository.url} target="_blank" rel="noopener noreferrer" className="min-h-10 shrink-0 rounded-lg border border-border px-3 py-2 text-sm text-primary">
                 Otevřít na GitHubu
               </a>
             </div>
             <p className="mt-3 text-xs text-muted-foreground">
-              Výchozí větev <code>{repository.defaultBranch}</code> · {repository.stars.toLocaleString("cs-CZ")} hvězdiček ·{" "}
+              Výchozí větev <code className="[overflow-wrap:anywhere]">{repository.defaultBranch}</code> · {repository.stars.toLocaleString("cs-CZ")} hvězdiček ·{" "}
               {repository.openIssues.toLocaleString("cs-CZ")} otevřených issues
             </p>
             <h4 className="mt-4 text-sm font-medium">Poslední commity</h4>
@@ -104,7 +127,7 @@ export function DevelopmentStudioScreen() {
               <ol className="mt-2 space-y-2">
                 {repository.commits.map((commit) => (
                   <li key={commit.sha} className="border-t border-border/70 pt-2">
-                    <a href={commit.url} target="_blank" rel="noopener noreferrer" className="text-sm font-medium hover:text-primary">
+                    <a href={commit.url} target="_blank" rel="noopener noreferrer" className="[overflow-wrap:anywhere] text-sm font-medium hover:text-primary">
                       {commit.message}
                     </a>
                     <p className="mt-1 text-xs text-muted-foreground">{commit.author} · {commit.sha.slice(0, 7)}</p>

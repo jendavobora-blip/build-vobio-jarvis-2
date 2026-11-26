@@ -5,6 +5,7 @@ import {
   GitHubRepositoryError,
   isValidRepositoryPath,
 } from "../lib/github/public-repository"
+import { singleFlightGitHubRepository } from "../lib/github/request-cache"
 
 const publicRepository = {
   full_name: "octocat/hello-world",
@@ -52,8 +53,12 @@ test("GitHub repository lookup returns only public metadata and recent commits",
 
 test("GitHub repository lookup validates path segments before making requests", async () => {
   assert.equal(isValidRepositoryPath("octocat", "hello-world"), true)
+  assert.equal(isValidRepositoryPath("octocat", "hello_world.js"), true)
+  assert.equal(isValidRepositoryPath("octocat", "hello-world-v2"), true)
+  assert.equal(isValidRepositoryPath("octocat", ".github"), true)
   assert.equal(isValidRepositoryPath("../attacker", "repo"), false)
   assert.equal(isValidRepositoryPath("octocat", ".."), false)
+  assert.equal(isValidRepositoryPath("octocat", "repo/name"), false)
 
   let calls = 0
   const fetcher: typeof fetch = async () => {
@@ -90,4 +95,51 @@ test("GitHub rate limits are surfaced as a retryable public error", async () => 
     assert.equal(error.status, 429)
     return true
   })
+})
+
+  test("empty public repositories are valid and expose no commits", async () => {
+    let requests = 0
+    const fetcher: typeof fetch = async () => {
+      requests += 1
+      if (requests === 1) return Response.json({ ...publicRepository, full_name: "octocat/empty" })
+      return Response.json({ message: "Git Repository is empty." }, { status: 409 })
+    }
+    const repository = await getPublicGitHubRepository("octocat", "empty", fetcher)
+    assert.equal(repository.fullName, "octocat/empty")
+    assert.deepEqual(repository.commits, [])
+  })
+
+  test("concurrent GitHub lookups are coalesced for one repository", async () => {
+    let calls = 0
+    const loader = async () => {
+      calls += 1
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      return {
+        fullName: "octocat/hello-world",
+        description: null,
+        url: "https://github.com/octocat/hello-world",
+        defaultBranch: "main",
+        stars: 0,
+        openIssues: 0,
+        updatedAt: "2026-11-26T10:00:00Z",
+        commits: [],
+      }
+    }
+
+    const [first, second] = await Promise.all([
+      singleFlightGitHubRepository("octocat/hello-world", loader),
+      singleFlightGitHubRepository("octocat/hello-world", loader),
+    ])
+    assert.equal(first.fullName, "octocat/hello-world")
+    assert.equal(second.fullName, first.fullName)
+    assert.equal(calls, 1)
+  })
+
+test("other GitHub conflicts remain errors", async () => {
+  let calls = 0
+  const fetcher: typeof fetch = async () => ++calls === 1
+    ? Response.json(publicRepository)
+    : Response.json({ message: "Repository unavailable" }, { status: 409 })
+  await assert.rejects(getPublicGitHubRepository("octocat", "hello-world", fetcher), (error: unknown) =>
+    error instanceof GitHubRepositoryError && error.status === 502)
 })
