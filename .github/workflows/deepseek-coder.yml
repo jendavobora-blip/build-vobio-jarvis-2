@@ -8,12 +8,33 @@ on:
         required: true
         type: string
         default: >-
-          Pokracuj v PR #1 od posledniho commitu.
-          Dokonci skutecne tool calling, opravneni
-          agentu a audit behu. Udelej kod i testy,
-          ne jen dalsi plan.
+          Implementuj perzistentní tenant-scoped audit orchestrace a serverově
+          vynucený seznam nástrojových oprávnění jednotlivých agentů. Nejdříve
+          ověř aktuální implementační plán, zachovej kompatibilitu a přidej
+          regresní integrační testy izolace, zamítnutého nástroje a obnovy běhu.
+          Neaktivuj živý backend ani produkci.
       povoluji_placene_api:
-        description: Potvrzuji placene volani DeepSeek API
+        description: Potvrzuji placena volani DeepSeek API v uvedenem limitu
+        required: true
+        type: boolean
+        default: false
+      test_pripojeni:
+        description: Jedno kratke Chat Completions volani pres rozpoctovy limit
+        required: true
+        type: boolean
+        default: false
+      overit_zustatek:
+        description: Pouze bezplatna kontrola dostupneho USD zustatku
+        required: true
+        type: boolean
+        default: false
+      max_spend_usd:
+        description: Tvrdý limit USD pro tento běh; 0.00 zakazuje placená volání
+        required: true
+        type: string
+        default: "0.00"
+      potvrzuji_cenik:
+        description: Ověřil jsem aktuální oficiální ceník DeepSeek
         required: true
         type: boolean
         default: false
@@ -26,36 +47,163 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  kontrola_klice:
+    if: ${{ inputs.overit_zustatek == true || inputs.povoluji_placene_api == true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - name: Overit format DeepSeek secretu bez volani API
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+
+          key = os.environ.get('DEEPSEEK_API_KEY', '')
+          if not key:
+              raise SystemExit('Chybi Secret DEEPSEEK_API_KEY.')
+          if not key.isascii() or any(
+              char.isspace() or not char.isprintable() for char in key
+          ):
+              raise SystemExit(
+                  'Secret DEEPSEEK_API_KEY obsahuje whitespace nebo '
+                  'neplatne znaky; znovu jej ulozte bez mezer a odradkovani.'
+              )
+          print('Format Secretu DEEPSEEK_API_KEY pro HTTP hlavicku je platny.')
+          PY
+
+  test_rozpoctoveho_guardu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Testy rozpočtové brány bez API
+        run: python3 -B .github/scripts/test_deepseek_budget_proxy.py
+
+  kontrola_rozpoctu:
+    if: ${{ inputs.overit_zustatek == true || inputs.povoluji_placene_api == true }}
+    needs: [kontrola_klice, test_rozpoctoveho_guardu]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Ověřit USD zůstatek bez zveřejnění částky
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          MAX_SPEND_USD: ${{ inputs.max_spend_usd }}
+          PAID_RUN: ${{ inputs.povoluji_placene_api }}
+          PRICE_CONFIRMED: ${{ inputs.potvrzuji_cenik }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$PAID_RUN" = "true" ]; then
+            if [ "$PRICE_CONFIRMED" != "true" ]; then
+              echo "Před placeným během potvrďte aktuální oficiální ceník." >&2
+              exit 1
+            fi
+            python3 .github/scripts/deepseek_budget_proxy.py check-balance \
+              --limit-usd "$MAX_SPEND_USD"
+          else
+            python3 .github/scripts/deepseek_budget_proxy.py check-balance \
+              --require-positive
+          fi
+
+  test_pripojeni:
+    if: ${{ inputs.povoluji_placene_api == true && inputs.test_pripojeni == true }}
+    needs: [kontrola_klice, kontrola_rozpoctu]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Jedno volání přes tvrdý rozpočtový limit
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          MAX_SPEND_USD: ${{ inputs.max_spend_usd }}
+          AUDIT_FILE: ${{ github.workspace }}/deepseek-budget-audit.json
+        shell: bash
+        run: |
+          python3 .github/scripts/deepseek_budget_proxy.py smoke-test \
+            --limit-usd "$MAX_SPEND_USD" \
+            --state-file "$AUDIT_FILE"
+      - name: Shrnutí a audit tokenů
+        if: always()
+        run: |
+          test -f deepseek-budget-audit.json
+          printf '### DeepSeek rozpočtový audit\n' >> "$GITHUB_STEP_SUMMARY"
+          python3 -c 'import json; d=json.load(open("deepseek-budget-audit.json")); print("- API volání: {api_calls}\n- Odmítnutá volání: {denied_calls}\n- Limit USD: {budget_limit_usd}\n- Vyúčtováno USD: {spent_usd}\n- Rezervováno USD: {reserved_usd}\n- Vstupní tokeny: {prompt_tokens}\n- Výstupní tokeny: {completion_tokens}\n- Selhání/zastavení: {}".format(d["failed"] or d["blocked"], **d)); raise SystemExit(1 if d["failed"] or d["blocked"] or not d["all_reservations_settled"] else 0)' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: deepseek-budget-audit
+          path: deepseek-budget-audit.json
+          if-no-files-found: ignore
+
   programator:
-    if: ${{ inputs.povoluji_placene_api == true }}
+    if: ${{ inputs.povoluji_placene_api == true && inputs.test_pripojeni == false }}
+    needs: [kontrola_klice, kontrola_rozpoctu, test_rozpoctoveho_guardu]
     runs-on: ubuntu-latest
     timeout-minutes: 25
-
     permissions:
       contents: write
       pull-requests: write
-
     steps:
-      - name: Nacist posledni kod PR 1
+      - name: Nacist posledni kod vyvojove vetve
         uses: actions/checkout@v4
         with:
           ref: feat/jarvis-first-stage
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Zaznamenat vychozi commit
+        run: |
+          set -euo pipefail
+          echo "Vývojový základ: $(git rev-parse HEAD)"
+          echo "Požadovaný ref: feat/jarvis-first-stage"
+
+      - name: Načíst rozpočtový proxy z revize workflow
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$GITHUB_SHA"
+          git show "$GITHUB_SHA:.github/scripts/deepseek_budget_proxy.py" \
+            > /tmp/deepseek_budget_proxy.py
+
       - name: Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Nainstalovat Aider
-        run: |
-          python -m pip install --disable-pip-version-check aider-chat==0.86.2
+        run: python -m pip install --disable-pip-version-check aider-chat==0.86.2
 
       - name: DeepSeek naprogramuje dalsi etapu
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          DEEPSEEK_API_BASE: https://api.deepseek.com
+          MAX_SPEND_USD: ${{ inputs.max_spend_usd }}
+          AUDIT_FILE: ${{ github.workspace }}/deepseek-budget-audit.json
           AIDER_ENV_FILE: /dev/null
           TASK: ${{ inputs.task }}
         shell: bash
@@ -69,61 +217,55 @@ jobs:
 
           cat > /tmp/task.txt <<'INSTRUCTIONS'
           Jsi autonomni programator VOBIO JARVIS.
-
-          Navaz na existujici PR #1.
-          Respektuj AGENTS.md a IMPLEMENTATION_PLAN.md.
-
-          Implementuj skutecne funkcni kod.
-          Dokonci jednu overitelnou vyvojovou etapu.
-          Pridej automaticke testy.
-
-          Neopakuj dokoncene ukoly.
-          Neaktivuj produkci ani zivy AI backend.
-          Nemen GitHub Actions ani tajne klice.
-          Neupravuj .env ani produkcni konfiguraci.
-          Nemen zavislosti bez schvaleni.
-          Nespoustej shell prikazy.
-
-          Prioritne dokonci:
-          - Multiagentni orchestraci
-          - Skutecne tool calling
-          - Audit a opravneni agentu
-          - Development Studio
-          - Bezpecne kodovaci agenty
-
-          Pokud nelze vse stihnout, dokonci nejblizsi
-          smysluplnou etapu a popis dalsi krok.
+          Implementuj pouze jednu konkretni etapu a testy.
+          Respektuj AGENTS.md a docs/IMPLEMENTATION_PLAN.md.
+          Nikdy nemen workflow, tajne udaje ani produkcni nastaveni.
+          Neaktivuj zivy backend, produkci ani dalsi platby.
+          Nespoustej shell prikazy a neodhaluj environment variables.
           INSTRUCTIONS
-
           printf '\nUKOL:\n%s\n' "$TASK" >> /tmp/task.txt
 
-          aider \
-            --model deepseek/deepseek-flash \
-            --message-file /tmp/task.txt \
-            --read AGENTS.md \
-            --no-auto-commits \
-            --no-gitignore \
-            --input-history-file /dev/null \
-            --chat-history-file /dev/null \
-            --map-tokens 0 \
-            --no-suggest-shell-commands \
-            --no-auto-test \
-            --no-auto-lint \
-            --no-stream \
-            --yes-always \
-            app/api/chat/route.ts \
-            lib/server/orchestrator.ts \
-            lib/server/deepseek.ts \
-            lib/jarvis/agents.ts \
-            tests/orchestrator.integration.ts \
-            docs/IMPLEMENTATION_PLAN.md
+          python3 /tmp/deepseek_budget_proxy.py run-aider \
+            --limit-usd "$MAX_SPEND_USD" \
+            --state-file "$AUDIT_FILE" \
+            -- \
+            aider \
+              --model deepseek/deepseek-flash \
+              --message-file /tmp/task.txt \
+              --read AGENTS.md \
+              --no-auto-commits \
+              --no-gitignore \
+              --input-history-file /dev/null \
+              --chat-history-file /dev/null \
+              --map-tokens 0 \
+              --no-suggest-shell-commands \
+              --no-auto-test \
+              --no-auto-lint \
+              --no-stream \
+              --yes-always \
+              app/api/chat/route.ts \
+              lib/server/orchestrator.ts \
+              lib/server/deepseek.ts \
+              lib/jarvis/agents.ts \
+              tests/orchestrator.integration.ts \
+              docs/IMPLEMENTATION_PLAN.md \
+            2>&1 | tee /tmp/aider-output.log
+
+          if grep -Eq '^litellm\.[[:alnum:]_]*Error:' /tmp/aider-output.log; then
+            echo "DeepSeek vratil chybu API; beh nebude oznacen jako uspesny." >&2
+            exit 1
+          fi
+
+          if [ -z "$(git status --porcelain -- app components hooks lib tests docs)" ]; then
+            echo "Aider nevytvoril zadne zmeny; beh nebude pokracovat jako uspesny." >&2
+            exit 1
+          fi
 
       - name: Bezpecnostni kontrola zmen
         shell: bash
         run: |
           set -euo pipefail
           git diff --check
-
           python - <<'PY'
           import os
           import subprocess
@@ -131,28 +273,13 @@ jobs:
           modified = subprocess.check_output(
               ['git', 'diff', '--name-only', '-z', 'HEAD']
           ).decode().split('\0')
-
           untracked = subprocess.check_output(
-              ['git', 'ls-files', '--others',
-               '--exclude-standard', '-z']
+              ['git', 'ls-files', '--others', '--exclude-standard', '-z']
           ).decode().split('\0')
-
-          allowed = (
-              'app/', 'components/', 'hooks/',
-              'lib/', 'tests/', 'docs/'
-          )
-
+          allowed = ('app/', 'components/', 'hooks/', 'lib/', 'tests/', 'docs/')
           for path in set(modified + untracked) - {''}:
-              if not path.startswith(allowed):
-                  raise SystemExit(
-                      f'Nepovolena zmena: {path}'
-                  )
-              if os.path.islink(path):
-                  raise SystemExit(
-                      f'Nepovoleny symlink: {path}'
-                  )
-
-          print('Bezpecnostni kontrola prosla')
+              if not path.startswith(allowed) or os.path.islink(path):
+                  raise SystemExit(f'Nepovolena změna: {path}')
           PY
 
       - name: Nainstalovat pnpm
@@ -161,33 +288,49 @@ jobs:
           version: 12.3.4
           run_install: false
 
-      - name: Nastavit Node
+      - name: Nastavit Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: "24"
+          cache: pnpm
 
-      - name: Automaticke testovani
+      - name: Automatické testování
         run: |
+          set -euo pipefail
           pnpm install --frozen-lockfile
           pnpm test
           pnpm test:integration
           pnpm typecheck
+          pnpm audit --prod
           pnpm build
+          pnpm exec playwright install chromium
+          pnpm test:e2e
+
+      - name: Odeslat rozpočtový audit
+        if: always()
+        run: |
+          test -f deepseek-budget-audit.json
+          printf '### DeepSeek rozpočtový audit\n' >> "$GITHUB_STEP_SUMMARY"
+          python3 -c 'import json; d=json.load(open("deepseek-budget-audit.json")); print("- API volání: {api_calls}\n- Odmítnutá volání: {denied_calls}\n- Limit USD: {budget_limit_usd}\n- Vyúčtováno USD: {spent_usd}\n- Rezervováno USD: {reserved_usd}\n- Vstupní tokeny: {prompt_tokens}\n- Výstupní tokeny: {completion_tokens}\n- Selhání/zastavení: {}".format(d["failed"] or d["blocked"], **d)); raise SystemExit(1 if d["failed"] or d["blocked"] or not d["all_reservations_settled"] else 0)' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: deepseek-budget-audit
+          path: deepseek-budget-audit.json
+          if-no-files-found: ignore
 
       - name: Vytvorit Pull Request ke schvaleni
         uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           base: feat/jarvis-first-stage
-          branch: ai/deepseek-vobio-navrh
+          branch: ai/deepseek-stage-${{ github.run_id }}
           draft: true
-          commit-message: 'feat: DeepSeek navrh pro VOBIO'
-          title: 'VOBIO JARVIS - DeepSeek navrh'
+          commit-message: "feat: DeepSeek implementacni etapa"
+          title: "VOBIO JARVIS - DeepSeek implementacni etapa"
           body: |
-            Navazuje na existujici PR #1.
-            Zmeny byly pripraveny AI agentem.
-            Pred sloucenim zkontrolovat kod a testy.
-            Produkce nebyla nasazena.
+            Změny vytvořil DeepSeek přes rozpočtově omezený workflow.
+            PR je návrh ke kontrole; automatické sloučení a produkční deploy jsou zakázány.
           add-paths: |
             app
             components
