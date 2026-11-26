@@ -15,6 +15,7 @@ import { DeepSeekError } from "@/lib/server/deepseek"
 import { SPECIALISTS } from "@/lib/jarvis/agents"
 import type { ChatRequestBody, RunEvent } from "@/lib/jarvis/types"
 import { hasValidRequestOrigin } from "@/lib/server/request-security"
+import { preserveUsageForSettlement } from "@/lib/server/usage-settlement"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -143,13 +144,7 @@ export async function POST(request: Request) {
         })
         spent = { costUsd: total.costUsd, tokens: total.promptTokens + total.completionTokens }
       } catch (error) {
-        const usage = (error as { usage?: { costUsd?: number; promptTokens?: number; completionTokens?: number } }).usage
-        if (usage) {
-          spent = {
-            costUsd: Math.max(0, usage.costUsd ?? 0),
-            tokens: Math.max(0, (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0)),
-          }
-        }
+        spent = preserveUsageForSettlement(spent, error)
         if (auditRunId) {
           try {
             const failureReason: OrchestrationFailureReason = abort.signal.aborted

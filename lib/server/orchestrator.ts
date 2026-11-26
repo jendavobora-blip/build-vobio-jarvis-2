@@ -56,6 +56,23 @@ interface RunContext {
   audit: (event: OrchestrationAuditEvent) => Promise<void>
 }
 
+export interface RunOutcomeFlags {
+  aborted: boolean
+  budgetStopped: boolean
+  toolCallFailed: boolean
+  modelFailed: boolean
+  synthesized: boolean
+}
+
+export function getRunFailureReason(flags: RunOutcomeFlags): OrchestrationFailureReason | undefined {
+  if (flags.aborted) return "aborted"
+  if (flags.budgetStopped) return "budget_exceeded"
+  if (flags.toolCallFailed) return "tool_error"
+  if (flags.modelFailed) return "model_error"
+  if (!flags.synthesized) return "no_result"
+  return undefined
+}
+
 const now = () => Date.now()
 
 function maxTokensFor(body: ChatRequestBody, kind: "plan" | "specialist" | "final"): number {
@@ -704,17 +721,13 @@ export async function runOrchestration({ body, emit, signal, limits, audit }: Ru
     finalResult = result
   }
 
-  const failureReason: OrchestrationFailureReason | undefined = signal.aborted
-    ? "aborted"
-    : budgetStopped
-      ? "budget_exceeded"
-      : toolCallFailed
-        ? "tool_error"
-        : modelFailed
-          ? "model_error"
-          : !synthesized
-            ? "no_result"
-            : undefined
+  const failureReason = getRunFailureReason({
+    aborted: signal.aborted,
+    budgetStopped,
+    toolCallFailed,
+    modelFailed,
+    synthesized,
+  })
   if (failureReason) {
     await auditWithUsage({ runId, agentId: "orchestrator", event: "run_failed", failureReason })
     const message =

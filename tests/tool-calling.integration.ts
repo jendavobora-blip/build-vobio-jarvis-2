@@ -524,6 +524,44 @@ test("tool success audit failure propagates and is never relabeled as tool execu
   assert.ok(!events.some((event) => event.type === "final" || event.type === "done"))
 })
 
+test("tool failure audit failure propagates without misreporting tool success", async () => {
+  process.env.DEEPSEEK_API_KEY = "integration-test-placeholder"
+  installFetch({ firstCall: "tool", arguments: "not-json" })
+  const { runOrchestration } = await import("../lib/server/orchestrator")
+  const audit: OrchestrationAuditEvent[] = []
+  let failure: unknown
+  try {
+    await runOrchestration({
+      body: makeBody(orionMemory),
+      emit: () => {},
+      signal: new AbortController().signal,
+      limits: { maxTokens: 500_000, maxCostUsd: 5 },
+      audit: async (event) => {
+        audit.push(event)
+        if (event.event === "tool_failed") throw new Error("simulated failed-tool audit outage")
+      },
+    })
+  } catch (error) {
+    failure = error
+  }
+
+  assert.ok(failure instanceof Error)
+  assert.match(failure.message, /simulated failed-tool audit outage/)
+  assert.ok("usage" in failure)
+  assert.ok(!audit.some((event) => event.event === "tool_succeeded" || event.event === "run_completed"))
+})
+
+test("terminal status selection preserves abort, budget, tool, model, and no-result precedence", async () => {
+  const { getRunFailureReason } = await import("../lib/server/orchestrator")
+  const base = { aborted: false, budgetStopped: false, toolCallFailed: false, modelFailed: false, synthesized: false }
+  assert.equal(getRunFailureReason({ ...base, synthesized: true }), undefined)
+  assert.equal(getRunFailureReason(base), "no_result")
+  assert.equal(getRunFailureReason({ ...base, modelFailed: true }), "model_error")
+  assert.equal(getRunFailureReason({ ...base, toolCallFailed: true, modelFailed: true }), "tool_error")
+  assert.equal(getRunFailureReason({ ...base, budgetStopped: true, toolCallFailed: true }), "budget_exceeded")
+  assert.equal(getRunFailureReason({ ...base, aborted: true, budgetStopped: true }), "aborted")
+})
+
 test("concurrent specialist reservations cannot exceed a shared token budget", async () => {
   process.env.DEEPSEEK_API_KEY = "integration-test-placeholder"
   const calls: string[] = []
