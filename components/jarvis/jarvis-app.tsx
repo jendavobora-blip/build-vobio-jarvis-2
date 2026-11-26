@@ -218,7 +218,7 @@ export function JarvisApp() {
               </section>
             )}
 
-            {view === "development" && <DevelopmentStudioScreen authRevision={`${authRevision}:${Boolean(status.data?.authenticated)}`} />}
+            {view === "development" && <DevelopmentStudioScreen authRevision={`${authRevision}:${status.data?.accountScope ?? "anonymous"}`} />}
 
             {view === "orchestration" && (
               <section className="space-y-4">
@@ -264,6 +264,11 @@ export function JarvisApp() {
         statusError={Boolean(status.error)}
         onStatusChange={() => {
           setAuthRevision((revision) => revision + 1)
+          if (typeof BroadcastChannel !== "undefined") {
+            const channel = new BroadcastChannel("vobio-jarvis-auth")
+            channel.postMessage("session-changed")
+            channel.close()
+          }
           void status.mutate()
         }}
         lifetime={lifetime}

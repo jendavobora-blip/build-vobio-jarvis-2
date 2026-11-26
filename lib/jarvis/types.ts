@@ -87,6 +87,7 @@ export interface StatusResponse {
   liveEnabled: boolean
   authConfigured: boolean
   authenticated: boolean
+  accountScope?: string
   userRole?: "owner" | "member"
   databaseConfigured: boolean
   limits: { maxRequestUsd: number; maxRequestTokens: number; dailyBudgetUsd: number; runsPer10Min: number }

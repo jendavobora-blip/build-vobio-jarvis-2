@@ -19,7 +19,31 @@ export function DevelopmentStudioHistory() {
   const [error, setError] = useState<string | null>(null)
   const requestRef = useRef<AbortController | null>(null)
 
-  useEffect(() => () => requestRef.current?.abort(), [])
+  useEffect(() => {
+    const clearHistory = () => {
+      requestRef.current?.abort()
+      setRuns(null)
+      setEvents(null)
+      setSelectedId(null)
+      setError(null)
+      setLoading(false)
+    }
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") clearHistory()
+    }
+    window.addEventListener("blur", clearHistory)
+    window.addEventListener("pagehide", clearHistory)
+    document.addEventListener("visibilitychange", onVisibilityChange)
+    const channel = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel("vobio-jarvis-auth")
+    channel?.addEventListener("message", clearHistory)
+    return () => {
+      requestRef.current?.abort()
+      channel?.close()
+      window.removeEventListener("blur", clearHistory)
+      window.removeEventListener("pagehide", clearHistory)
+      document.removeEventListener("visibilitychange", onVisibilityChange)
+    }
+  }, [])
 
   const load = async (runId?: string) => {
     requestRef.current?.abort()
