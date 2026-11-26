@@ -44,6 +44,7 @@ export function JarvisApp() {
   const [input, setInput] = useState("")
   const [memoryOpen, setMemoryOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [authRevision, setAuthRevision] = useState(0)
   const [inspect, setInspect] = useState<AgentId | null>(null)
   const [hint, setHint] = useState<string | null>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -217,7 +218,7 @@ export function JarvisApp() {
               </section>
             )}
 
-            {view === "development" && <DevelopmentStudioScreen />}
+            {view === "development" && <DevelopmentStudioScreen authRevision={`${authRevision}:${Boolean(status.data?.authenticated)}`} />}
 
             {view === "orchestration" && (
               <section className="space-y-4">
@@ -261,7 +262,10 @@ export function JarvisApp() {
         setSettings={setSettings}
         status={status.data}
         statusError={Boolean(status.error)}
-        onStatusChange={() => status.mutate()}
+        onStatusChange={() => {
+          setAuthRevision((revision) => revision + 1)
+          void status.mutate()
+        }}
         lifetime={lifetime}
         onResetLifetime={() => setLifetime({ runs: 0, promptTokens: 0, completionTokens: 0, costUsd: 0 })}
         onPlayDemo={() => {
