@@ -22,6 +22,7 @@ export type DevelopmentAgentId = (typeof DEVELOPMENT_AGENTS)[number]["id"]
 export type DevelopmentStudioEvent = {
   id: string
   runId: string
+  sequence: number
   agentId: DevelopmentAgentId | "system"
   event: "run_started" | "agent_started" | "agent_mocked" | "executor_blocked" | "run_blocked"
   detailCode: "mock_only" | "sandbox_not_configured"
@@ -100,6 +101,7 @@ export async function createMockDevelopmentStudioRun(input: {
   ) => events.push({
     id: `${input.id}:${events.length}`,
     runId: input.id,
+    sequence: events.length,
     agentId,
     event,
     detailCode,

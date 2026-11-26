@@ -134,6 +134,7 @@ async function ensureSchema(sql: Sql) {
       id UUID PRIMARY KEY,
       owner_id TEXT NOT NULL,
       actor_id TEXT NOT NULL,
+      idempotency_key UUID NOT NULL,
       repository TEXT NOT NULL,
       task_hash TEXT NOT NULL CHECK (task_hash ~ '^[a-f0-9]{64}$'),
       mode TEXT NOT NULL CHECK (mode = 'mock_only'),
@@ -141,11 +142,17 @@ async function ensureSchema(sql: Sql) {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       UNIQUE (id, owner_id, actor_id)
     )`
+    await sql`ALTER TABLE jarvis_development_studio_runs ADD COLUMN IF NOT EXISTS idempotency_key UUID`
+    await sql`UPDATE jarvis_development_studio_runs SET idempotency_key = id WHERE idempotency_key IS NULL`
+    await sql`ALTER TABLE jarvis_development_studio_runs ALTER COLUMN idempotency_key SET NOT NULL`
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS jarvis_development_studio_runs_idempotency
+      ON jarvis_development_studio_runs (owner_id, actor_id, idempotency_key)`
     await sql`CREATE TABLE IF NOT EXISTS jarvis_development_studio_events (
       id TEXT PRIMARY KEY,
       run_id UUID NOT NULL,
       owner_id TEXT NOT NULL,
       actor_id TEXT NOT NULL,
+      event_order INTEGER NOT NULL CHECK (event_order >= 0),
       agent_id TEXT NOT NULL CHECK (agent_id IN ('system', 'architect', 'frontend', 'backend', 'ai', 'security', 'qa', 'devops', 'reviewer')),
       event TEXT NOT NULL CHECK (event IN ('run_started', 'agent_started', 'agent_mocked', 'executor_blocked', 'run_blocked')),
       detail_code TEXT NOT NULL CHECK (detail_code IN ('mock_only', 'sandbox_not_configured')),
@@ -153,10 +160,23 @@ async function ensureSchema(sql: Sql) {
       FOREIGN KEY (run_id, owner_id, actor_id)
         REFERENCES jarvis_development_studio_runs (id, owner_id, actor_id) ON DELETE CASCADE
     )`
+    await sql`ALTER TABLE jarvis_development_studio_events ADD COLUMN IF NOT EXISTS event_order INTEGER`
+    await sql`WITH numbered AS (
+      SELECT id, row_number() OVER (PARTITION BY run_id, owner_id, actor_id ORDER BY occurred_at, id) - 1 AS position
+      FROM jarvis_development_studio_events
+      WHERE event_order IS NULL
+    )
+    UPDATE jarvis_development_studio_events events
+      SET event_order = numbered.position
+      FROM numbered
+      WHERE events.id = numbered.id`
+    await sql`ALTER TABLE jarvis_development_studio_events ALTER COLUMN event_order SET NOT NULL`
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS jarvis_development_studio_events_order
+      ON jarvis_development_studio_events (run_id, owner_id, actor_id, event_order)`
     await sql`CREATE INDEX IF NOT EXISTS jarvis_development_studio_runs_owner_actor_created
       ON jarvis_development_studio_runs (owner_id, actor_id, created_at DESC)`
-    await sql`CREATE INDEX IF NOT EXISTS jarvis_development_studio_events_run_actor
-      ON jarvis_development_studio_events (run_id, owner_id, actor_id, occurred_at)`
+    await sql`CREATE INDEX IF NOT EXISTS jarvis_development_studio_events_run_sequence
+      ON jarvis_development_studio_events (run_id, owner_id, actor_id, event_order)`
     await sql`CREATE TABLE IF NOT EXISTS jarvis_orchestration_audit (
       id UUID PRIMARY KEY,
       event_key TEXT NOT NULL,
@@ -489,33 +509,72 @@ export interface DevelopmentStudioRunRow {
   id: string
   repository: string
   task_hash: string
+  idempotency_key?: string
   mode: "mock_only"
   status: "blocked" | "failed"
   created_at: string | Date
 }
 
+export class DevelopmentStudioIdempotencyConflictError extends Error {
+  constructor() {
+    super("Idempotency key was already used for a different Studio request.")
+    this.name = "DevelopmentStudioIdempotencyConflictError"
+  }
+}
+
 export async function persistDevelopmentStudioMockRun(
   ownerId: string,
   actorId: string,
+  idempotencyKey: string,
   run: DevelopmentStudioMockRun,
-): Promise<void> {
-  if (!ownerId || !actorId || !run.id || run.mode !== "mock_only" || run.status !== "blocked" ||
+): Promise<{ runId: string; created: boolean }> {
+  if (!ownerId || !actorId || !/^[0-9a-f-]{36}$/i.test(idempotencyKey) ||
+      !run.id || run.mode !== "mock_only" || run.status !== "blocked" ||
       run.plan.repository !== run.repository || !/^[a-f0-9]{64}$/.test(run.taskHash) ||
       run.events.length !== 3 + run.plan.steps.length * 2 ||
-      run.events.some((event) => event.runId !== run.id || !event.id)) {
+      run.events.some((event, index) => event.runId !== run.id || !event.id || event.sequence !== index)) {
     throw new Error("Neplatný běh Development Studia.")
   }
   const sql = await db()
   if (!sql) throw new Error("Historie Development Studia vyžaduje sdílenou databázi.")
-  await sql.transaction((tx) => [
-    tx`INSERT INTO jarvis_development_studio_runs
-      (id, owner_id, actor_id, repository, task_hash, mode, status)
-      VALUES (${run.id}::uuid, ${ownerId}, ${actorId}, ${run.repository}, ${run.taskHash}, ${run.mode}, ${run.status})`,
-    ...run.events.map((event) => tx`INSERT INTO jarvis_development_studio_events
-      (id, run_id, owner_id, actor_id, agent_id, event, detail_code, occurred_at)
-      VALUES (${event.id}, ${run.id}::uuid, ${ownerId}, ${actorId}, ${event.agentId},
-        ${event.event}, ${event.detailCode}, ${event.occurredAt})`),
-  ])
+  const eventRows = JSON.stringify(run.events.map((event) => ({
+    id: event.id,
+    event_order: event.sequence,
+    agent_id: event.agentId,
+    event: event.event,
+    detail_code: event.detailCode,
+    occurred_at: event.occurredAt,
+  })))
+  const inserted = (await sql`WITH created AS (
+    INSERT INTO jarvis_development_studio_runs
+      (id, owner_id, actor_id, idempotency_key, repository, task_hash, mode, status)
+    VALUES (${run.id}::uuid, ${ownerId}, ${actorId}, ${idempotencyKey}::uuid,
+      ${run.repository}, ${run.taskHash}, ${run.mode}, ${run.status})
+    ON CONFLICT (owner_id, actor_id, idempotency_key) DO NOTHING
+    RETURNING id
+  ), payload AS (
+    SELECT * FROM jsonb_to_recordset(${eventRows}::jsonb) AS events(
+      id TEXT, event_order INTEGER, agent_id TEXT, event TEXT, detail_code TEXT, occurred_at TIMESTAMPTZ
+    )
+  ), logged AS (
+    INSERT INTO jarvis_development_studio_events
+      (id, run_id, owner_id, actor_id, event_order, agent_id, event, detail_code, occurred_at)
+    SELECT payload.id, created.id, ${ownerId}, ${actorId}, payload.event_order, payload.agent_id,
+      payload.event, payload.detail_code, payload.occurred_at
+    FROM payload CROSS JOIN created
+    RETURNING id
+  )
+  SELECT id FROM created`) as { id: string }[]
+  if (inserted[0]) return { runId: inserted[0].id, created: true }
+
+  const existing = (await sql`SELECT id, repository, task_hash FROM jarvis_development_studio_runs
+    WHERE owner_id = ${ownerId} AND actor_id = ${actorId} AND idempotency_key = ${idempotencyKey}::uuid
+    LIMIT 1`) as { id: string; repository: string; task_hash: string }[]
+  if (!existing[0]) throw new Error("Studio run persistence did not return a row.")
+  if (existing[0].repository !== run.repository || existing[0].task_hash !== run.taskHash) {
+    throw new DevelopmentStudioIdempotencyConflictError()
+  }
+  return { runId: existing[0].id, created: false }
 }
 
 export async function listDevelopmentStudioRuns(
@@ -557,11 +616,11 @@ export async function listDevelopmentStudioEvents(
   if (!ownerId || !actorId || !runId) throw new Error("Neplatný rozsah auditu Development Studia.")
   const sql = await db()
   if (!sql) throw new Error("Audit Development Studia vyžaduje sdílenou databázi.")
-  return (await sql`SELECT id, run_id AS "runId", agent_id AS "agentId", event,
+  return (await sql`SELECT id, run_id AS "runId", event_order AS sequence, agent_id AS "agentId", event,
       detail_code AS "detailCode", occurred_at::text AS "occurredAt"
     FROM jarvis_development_studio_events
     WHERE run_id = ${runId}::uuid AND owner_id = ${ownerId} AND actor_id = ${actorId}
-    ORDER BY occurred_at ASC LIMIT 100`) as DevelopmentStudioEvent[]
+    ORDER BY event_order ASC LIMIT 100`) as DevelopmentStudioEvent[]
 }
 
 export type OrchestrationAuditEvent =

@@ -6,6 +6,7 @@ import {
   getDevelopmentStudioRun,
   listDevelopmentStudioEvents,
   listDevelopmentStudioRuns,
+  DevelopmentStudioIdempotencyConflictError,
   persistDevelopmentStudioMockRun,
 } from "@/lib/server/db"
 import { authenticatedUser } from "@/lib/server/auth"
@@ -17,6 +18,7 @@ export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
 const requestSchema = z.object({
+  idempotencyKey: z.string().uuid(),
   repository: z.string().trim().min(3).max(140),
   task: z.string().trim().min(8).max(2000),
 }).strict()
@@ -118,16 +120,34 @@ export async function POST(request: Request) {
       task: parsed.data.task,
       taskHash,
     })
-    await persistDevelopmentStudioMockRun(user.ownerId, user.id, run)
+    const persistence = await persistDevelopmentStudioMockRun(
+      user.ownerId,
+      user.id,
+      parsed.data.idempotencyKey,
+      run,
+    )
+    const events = persistence.created
+      ? run.events
+      : await listDevelopmentStudioEvents(user.ownerId, user.id, persistence.runId)
     return Response.json(
       {
-        run: { id: run.id, repository: run.repository, taskHash: run.taskHash, mode: run.mode, status: run.status },
+        run: {
+          id: persistence.runId,
+          repository: run.repository,
+          taskHash: run.taskHash,
+          mode: run.mode,
+          status: run.status,
+          replayed: !persistence.created,
+        },
         plan: run.plan,
-        events: run.events,
+        events,
       },
-      { status: 201, headers: { "Cache-Control": "no-store" } },
+      { status: persistence.created ? 201 : 200, headers: { "Cache-Control": "no-store" } },
     )
-  } catch {
+  } catch (error) {
+    if (error instanceof DevelopmentStudioIdempotencyConflictError) {
+      return Response.json({ error: error.message }, { status: 409 })
+    }
     return Response.json({ error: "Mock běh nebylo možné bezpečně uložit." }, { status: 503 })
   }
 }

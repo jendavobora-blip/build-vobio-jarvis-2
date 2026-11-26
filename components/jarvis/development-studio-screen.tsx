@@ -20,6 +20,7 @@ export function DevelopmentStudioScreen() {
   const [error, setError] = useState<string | null>(null)
   const loadAbortRef = useRef<AbortController | null>(null)
   const loadRequestRef = useRef(0)
+  const mockIdempotencyRef = useRef<string | null>(null)
   useEffect(() => () => {
     loadRequestRef.current += 1
     loadAbortRef.current?.abort()
@@ -40,6 +41,7 @@ export function DevelopmentStudioScreen() {
     setRepository(null)
     setPlan(null)
     setMockEvents([])
+    mockIdempotencyRef.current = null
     setBusy(true)
     setError(null)
     setPlan(null)
@@ -80,15 +82,18 @@ export function DevelopmentStudioScreen() {
     setError(null)
     setMockEvents([])
     setMockBusy(true)
+    const idempotencyKey = mockIdempotencyRef.current ?? crypto.randomUUID()
+    mockIdempotencyRef.current = idempotencyKey
     try {
       const response = await fetch("/api/development-studio/runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repository: repository.fullName, task }),
+        body: JSON.stringify({ idempotencyKey, repository: repository.fullName, task }),
       })
       const body = await response.json() as { events?: DevelopmentStudioEvent[]; error?: string }
       if (!response.ok || !body.events) throw new Error(body.error ?? "Mock průchod nelze spustit.")
       setMockEvents(body.events)
+      mockIdempotencyRef.current = null
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Mock průchod nelze spustit.")
     } finally {
@@ -128,6 +133,7 @@ export function DevelopmentStudioScreen() {
                 setRepository(null)
                 setPlan(null)
                 setMockEvents([])
+                mockIdempotencyRef.current = null
                 setError(null)
               }}
               placeholder="vlastník/název"
@@ -184,6 +190,7 @@ export function DevelopmentStudioScreen() {
             setTask(event.target.value)
             setPlan(null)
             setMockEvents([])
+            mockIdempotencyRef.current = null
           }}
           placeholder="Popište změnu a očekávaný výsledek…"
           className="min-h-24 w-full rounded-xl border border-input bg-background p-3 text-base outline-none focus:border-primary"
