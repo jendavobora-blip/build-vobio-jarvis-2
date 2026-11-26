@@ -1,7 +1,8 @@
 import "server-only"
 import { z } from "zod"
-import { callJson, DeepSeekError, MAX_ATTEMPTS } from "./deepseek"
+import { callChat, callChatJson, callJson, DeepSeekError, MAX_ATTEMPTS, type ChatMessage } from "./deepseek"
 import { plannerSystem, specialistSystem, synthesisSystem } from "./prompts"
+import { executeSearchMemory, SEARCH_MEMORY_TOOL, TOOL_NAME, ToolError } from "./tools"
 import { AGENTS, QUICK_MAX_SPECIALISTS, SPECIALISTS } from "@/lib/jarvis/agents"
 import { addUsage, emptyUsage, worstCaseCost } from "@/lib/jarvis/pricing"
 import { retrieveMemories } from "@/lib/jarvis/retrieval"
@@ -10,6 +11,7 @@ import type {
   AgentOutput,
   ChatRequestBody,
   FinalAnswer,
+  ModelId,
   RunEvent,
   SpecialistId,
   Usage,
@@ -39,6 +41,8 @@ const finalSchema = z.object({
   nextSteps: z.array(trimmed(300)).max(10).catch([]),
   needsApproval: z.array(trimmed(300)).max(10).catch([]),
 })
+
+const memoryToolContextSchema = z.object({ context: z.string().optional() })
 
 type Emit = (event: RunEvent) => void
 
@@ -91,13 +95,14 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
   let total = emptyUsage()
   const start = now()
   const runId = crypto.randomUUID()
+  let budgetStopped = false
 
   let inFlightTokens = 0
   let inFlightCost = 0
-  const reserveCallBudget = (promptText: string, maxOut: number): (() => void) | undefined => {
+  const reserveCallBudget = (promptText: string, maxOut: number, model: ModelId = body.model): (() => void) | undefined => {
     const promptTokens = estimateTokens(promptText)
     const tokens = (promptTokens + maxOut) * MAX_ATTEMPTS
-    const cost = worstCaseCost(body.model, promptTokens, maxOut) * MAX_ATTEMPTS
+    const cost = worstCaseCost(model, promptTokens, maxOut) * MAX_ATTEMPTS
     if (
       total.promptTokens + total.completionTokens + inFlightTokens + tokens > limits.maxTokens ||
       total.costUsd + inFlightCost + cost > limits.maxCostUsd
@@ -132,6 +137,195 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
   const memoryContext = matches.length
     ? matches.map((m) => `- [${m.item.category}] ${m.item.title}: ${m.item.content.slice(0, 600)}`).join("\n")
     : "(žádné relevantní položky paměti)"
+
+  /* 1b. Single fixed read-only tool round over the request's own memories (deepseek-flash). */
+  const toolModel: ModelId = "deepseek-flash"
+  const runMemoryTool = async (): Promise<string> => {
+    if (body.memories.length === 0) return ""
+
+    const system =
+      "Jsi paměťový vyhledávač VOBIO JARVIS. Máš k dispozici jediný nástroj search_memory, který prohledá POUZE paměťové položky přiložené k tomuto požadavku. Pokud potřebuješ doplnit kontext, zavolej nástroj search_memory nejvýše v jednom kole. Nevymýšlej data, která v paměti nejsou."
+    const user = `Zadání uživatele:\n${body.message}\n\nPokud je to užitečné, vyhledej relevantní položky v paměti nástrojem search_memory. Poté vrať JSON ve tvaru {"context": "stručné shrnutí nebo prázdný řetězec"}.`
+
+    emit({
+      type: "agent_status",
+      agent: "memory",
+      status: "thinking",
+      task: "Tool: search_memory",
+      activity: "Zvažuji vyhledání v paměti",
+      at: now(),
+    })
+
+    const reserveFirst = reserveCallBudget(system + user, 500, toolModel)
+    if (!reserveFirst) {
+      budgetStopped = true
+      emit({ type: "budget_stop", reason: "Nástroj search_memory přeskočen – byl by překročen limit požadavku.", at: now() })
+      return ""
+    }
+
+    let first: Awaited<ReturnType<typeof callChat>>
+    try {
+      first = await callChat({
+        model: toolModel,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+        maxTokens: 500,
+        reasoning: false,
+        jsonMode: false,
+        tools: [SEARCH_MEMORY_TOOL],
+        toolChoice: "auto",
+        signal,
+      })
+      track(first.usage)
+    } catch (error) {
+      const usage = (error as { usage?: Usage }).usage
+      if (usage) track(usage)
+      const message = error instanceof DeepSeekError ? error.message : "Volání nástroje selhalo."
+      emit({
+        type: "agent_error",
+        agent: "memory",
+        message,
+        attempts: (error as { attempts?: number }).attempts ?? 1,
+        at: now(),
+      })
+      if (error instanceof DeepSeekError && error.fatal) {
+        Object.assign(error, { usage: total })
+        throw error
+      }
+      return ""
+    } finally {
+      reserveFirst()
+    }
+
+    if (!first.toolCalls.length) {
+      emit({
+        type: "agent_status",
+        agent: "memory",
+        status: "done",
+        task: "Tool: search_memory",
+        activity: "Nástroj nebyl potřeba",
+        at: now(),
+      })
+      return ""
+    }
+
+    const assistantMessage: ChatMessage = { role: "assistant", content: first.content, tool_calls: first.toolCalls }
+    const toolMessages: ChatMessage[] = []
+    let toolFailed = false
+    let matchCount = 0
+
+    // One tool round only: every tool_call in this first response is validated and
+    // executed here; the follow-up call cannot request further tool execution.
+    for (const call of first.toolCalls) {
+      const fn = (call as { function?: { name?: string; arguments?: string } }).function
+      if (!fn || fn.name !== TOOL_NAME) {
+        toolFailed = true
+        const message = `Neznámý nástroj: ${fn?.name ?? "?"}`
+        emit({ type: "agent_error", agent: "memory", message, attempts: 1, at: now() })
+        toolMessages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: message }) })
+        continue
+      }
+      try {
+        const outcome = executeSearchMemory(body.memories, fn.arguments ?? "")
+        matchCount += outcome.matches
+        emit({
+          type: "agent_status",
+          agent: "memory",
+          status: "thinking",
+          task: "Tool: search_memory",
+          activity: `search_memory: ${outcome.matches} výsledků`,
+          at: now(),
+        })
+        toolMessages.push({ role: "tool", tool_call_id: call.id, content: outcome.content })
+      } catch (error) {
+        toolFailed = true
+        const message = error instanceof ToolError ? error.message : "Nástroj selhal."
+        emit({ type: "agent_error", agent: "memory", message, attempts: 1, at: now() })
+        toolMessages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: message }) })
+      }
+    }
+
+    const finalUser = `${user}\n\nNyní vrať pouze JSON ve tvaru {"context": "..."} – nástroj už znovu nevolat.`
+    const finalMessages: ChatMessage[] = [
+      { role: "system", content: system },
+      { role: "user", content: user },
+      assistantMessage,
+      ...toolMessages,
+    ]
+    const reserveSecond = reserveCallBudget(system + finalUser + JSON.stringify(toolMessages), 500, toolModel)
+    if (!reserveSecond) {
+      budgetStopped = true
+      emit({
+        type: "budget_stop",
+        reason: "Dokončení nástroje search_memory přeskočeno – byl by překročen limit požadavku.",
+        at: now(),
+      })
+      return ""
+    }
+
+    try {
+      const contextResult = await callChatJson(
+        {
+          model: toolModel,
+          messages: finalMessages,
+          maxTokens: 500,
+          reasoning: false,
+          jsonMode: true,
+          tools: [SEARCH_MEMORY_TOOL],
+          toolChoice: "none",
+          signal,
+        },
+        (value) => memoryToolContextSchema.parse(value),
+      )
+      track(contextResult.usage)
+      if (toolFailed) {
+        emit({
+          type: "agent_status",
+          agent: "memory",
+          status: "done",
+          task: "Tool: search_memory",
+          activity: "Nástroj selhal",
+          at: now(),
+        })
+        return ""
+      }
+      const context = (contextResult.data.context ?? "").trim().slice(0, 800)
+      emit({
+        type: "agent_status",
+        agent: "memory",
+        status: "done",
+        task: "Tool: search_memory",
+        activity: context ? `Tool dokončen: ${matchCount} výsledků` : "Tool dokončen: bez výsledků",
+        at: now(),
+      })
+      return context
+    } catch (error) {
+      const usage = (error as { usage?: Usage }).usage
+      if (usage && usage.promptTokens) track(usage)
+      const message = error instanceof DeepSeekError ? error.message : "Dokončení nástroje selhalo."
+      emit({
+        type: "agent_error",
+        agent: "memory",
+        message,
+        attempts: (error as { attempts?: number }).attempts ?? 1,
+        at: now(),
+      })
+      if (error instanceof DeepSeekError && error.fatal) {
+        Object.assign(error, { usage: total })
+        throw error
+      }
+      return ""
+    } finally {
+      reserveSecond()
+    }
+  }
+
+  const toolContext = await runMemoryTool()
+  const enrichedMemoryContext = toolContext
+    ? `${memoryContext}\n\nDoplněno nástrojem search_memory:\n${toolContext}`
+    : memoryContext
 
   /* 2. Orchestrator plans the team */
   const limit = body.depth === "quick" ? QUICK_MAX_SPECIALISTS : SPECIALISTS.length
@@ -224,13 +418,12 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
 
   /* 3. Specialists in dependency phases */
   const outputs: Partial<Record<AgentId, AgentOutput>> = {}
-  let budgetStopped = false
 
   const runSpecialist = async (agent: SpecialistId, task: string, upstream: AgentId[]) => {
     if (signal.aborted) return
     const system = specialistSystem(agent, body.mode)
     const prior = upstream.filter((id) => outputs[id])
-    const user = `Úkol uživatele:\n${body.message}\n\nTvůj dílčí úkol: ${task}\n\nKontext z paměti uživatele:\n${memoryContext}${
+    const user = `Úkol uživatele:\n${body.message}\n\nTvůj dílčí úkol: ${task}\n\nKontext z paměti uživatele:\n${enrichedMemoryContext}${
       prior.length ? `\n\nVýstupy ostatních agentů:\n${formatOutputs(Object.fromEntries(prior.map((id) => [id, outputs[id]])))}` : ""
     }`
     const maxOut = maxTokensFor(body, "specialist")
@@ -310,7 +503,7 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
       at: now(),
     })
     const system = synthesisSystem(body.mode)
-    const user = `Úkol uživatele:\n${body.message}\n\nKontext z paměti:\n${memoryContext}\n\nVýstupy specialistů:\n${
+    const user = `Úkol uživatele:\n${body.message}\n\nKontext z paměti:\n${enrichedMemoryContext}\n\nVýstupy specialistů:\n${
       formatOutputs(outputs) || "(žádné – odpověz sám a stručně)"
     }`
     const maxOut = maxTokensFor(body, "final")
