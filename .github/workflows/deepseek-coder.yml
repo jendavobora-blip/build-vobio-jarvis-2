@@ -154,7 +154,7 @@ jobs:
         run: |
           test -f deepseek-budget-audit.json
           printf '### DeepSeek rozpočtový audit\n' >> "$GITHUB_STEP_SUMMARY"
-          python3 -c 'import json; d=json.load(open("deepseek-budget-audit.json")); print("- API volání: {api_calls}\n- Odmítnutá volání: {denied_calls}\n- Limit USD: {budget_limit_usd}\n- Vyúčtováno USD: {spent_usd}\n- Rezervováno USD: {reserved_usd}\n- Vstupní tokeny: {prompt_tokens}\n- Výstupní tokeny: {completion_tokens}\n- Selhání/zastavení: {}".format(d["failed"] or d["blocked"], **d)); raise SystemExit(1 if d["failed"] or d["blocked"] or not d["all_reservations_settled"] else 0)' >> "$GITHUB_STEP_SUMMARY"
+          python3 -c 'import json; d=json.load(open("deepseek-budget-audit.json")); print("- API volání: {api_calls}\n- Odmítnutá volání: {denied_calls}\n- Limit USD: {budget_limit_usd}\n- Celkem započteno proti limitu USD: {spent_usd}\n- Ověřená skutečná spotřeba USD: {actual_spent_usd}\n- Konzervativní rezervace při chybách USD: {failed_reserved_usd}\n- Nevyřízená rezervace USD: {reserved_usd}\n- Vstupní tokeny: {prompt_tokens}\n- Výstupní tokeny: {completion_tokens}\n- HTTP chyby poskytovatele: {provider_http_errors}\n- Transportní chyby poskytovatele: {provider_transport_errors}\n- Chyby formátu odpovědi: {provider_response_errors}\n- Selhání/zastavení: {}".format(d["failed"] or d["blocked"], **d)); raise SystemExit(1 if d["failed"] or d["blocked"] or not d["all_reservations_settled"] else 0)' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -190,6 +190,8 @@ jobs:
           git fetch --no-tags origin "$GITHUB_SHA"
           git show "$GITHUB_SHA:.github/scripts/deepseek_budget_proxy.py" \
             > /tmp/deepseek_budget_proxy.py
+          git show "$GITHUB_SHA:.github/scripts/deepseek-aider-model-settings.yml" \
+            > /tmp/deepseek-aider-model-settings.yml
 
       - name: Python 3.12
         uses: actions/setup-python@v5
@@ -231,6 +233,10 @@ jobs:
             -- \
             aider \
               --model deepseek/deepseek-flash \
+              --model-settings-file /tmp/deepseek-aider-model-settings.yml \
+              --timeout 75 \
+              --analytics-disable \
+              --no-check-update \
               --message-file /tmp/task.txt \
               --read AGENTS.md \
               --no-auto-commits \
@@ -311,7 +317,7 @@ jobs:
         run: |
           test -f deepseek-budget-audit.json
           printf '### DeepSeek rozpočtový audit\n' >> "$GITHUB_STEP_SUMMARY"
-          python3 -c 'import json; d=json.load(open("deepseek-budget-audit.json")); print("- API volání: {api_calls}\n- Odmítnutá volání: {denied_calls}\n- Limit USD: {budget_limit_usd}\n- Vyúčtováno USD: {spent_usd}\n- Rezervováno USD: {reserved_usd}\n- Vstupní tokeny: {prompt_tokens}\n- Výstupní tokeny: {completion_tokens}\n- Selhání/zastavení: {}".format(d["failed"] or d["blocked"], **d)); raise SystemExit(1 if d["failed"] or d["blocked"] or not d["all_reservations_settled"] else 0)' >> "$GITHUB_STEP_SUMMARY"
+          python3 -c 'import json; d=json.load(open("deepseek-budget-audit.json")); print("- API volání: {api_calls}\n- Odmítnutá volání: {denied_calls}\n- Limit USD: {budget_limit_usd}\n- Celkem započteno proti limitu USD: {spent_usd}\n- Ověřená skutečná spotřeba USD: {actual_spent_usd}\n- Konzervativní rezervace při chybách USD: {failed_reserved_usd}\n- Nevyřízená rezervace USD: {reserved_usd}\n- Vstupní tokeny: {prompt_tokens}\n- Výstupní tokeny: {completion_tokens}\n- HTTP chyby poskytovatele: {provider_http_errors}\n- Transportní chyby poskytovatele: {provider_transport_errors}\n- Chyby formátu odpovědi: {provider_response_errors}\n- Selhání/zastavení: {}".format(d["failed"] or d["blocked"], **d)); raise SystemExit(1 if d["failed"] or d["blocked"] or not d["all_reservations_settled"] else 0)' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

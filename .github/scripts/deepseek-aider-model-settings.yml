@@ -1,0 +1,3 @@
+- name: deepseek/deepseek-flash
+  extra_params:
+    num_retries: 0

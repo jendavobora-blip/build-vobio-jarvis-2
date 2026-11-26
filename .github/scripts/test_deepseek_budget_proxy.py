@@ -1,8 +1,10 @@
 import http.client
+import io
 import json
 import sys
 import tempfile
 import unittest
+import urllib.error
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
@@ -128,6 +130,8 @@ class BudgetProxyTests(unittest.TestCase):
         ledger.settle(reservation_id, Decimal("0.004"), failed=True)
         snapshot = ledger.snapshot()
         self.assertTrue(snapshot["failed"])
+        self.assertEqual(snapshot["actual_spent_usd"], "0")
+        self.assertEqual(snapshot["failed_reserved_usd"], "0.004")
         self.assertTrue(snapshot["all_reservations_settled"])
         with self.assertRaises(BudgetError):
             ledger.reserve(Decimal("0.007"))
@@ -181,6 +185,8 @@ class BudgetProxyTests(unittest.TestCase):
             self.assertEqual(snapshot["prompt_tokens"], 50)
             self.assertEqual(snapshot["completion_tokens"], 2)
             self.assertEqual(snapshot["spent_usd"], "0.0000174")
+            self.assertEqual(snapshot["actual_spent_usd"], "0.0000174")
+            self.assertEqual(snapshot["failed_reserved_usd"], "0")
             self.assertEqual(snapshot["reserved_usd"], "0")
             self.assertTrue(snapshot["all_reservations_settled"])
         finally:
@@ -229,7 +235,101 @@ class BudgetProxyTests(unittest.TestCase):
                 connection.close()
             snapshot = ledger.snapshot()
             self.assertTrue(snapshot["failed"])
+            self.assertEqual(snapshot["provider_response_errors"], {"usage_missing": 1})
+            self.assertEqual(snapshot["actual_spent_usd"], "0")
+            self.assertEqual(snapshot["failed_reserved_usd"], snapshot["spent_usd"])
             self.assertTrue(snapshot["all_reservations_settled"])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_upstream_http_status_is_audited_without_exposing_response_body(self):
+        server, _thread = start_proxy(Decimal("0.01"), "provider-secret", "local-token")
+        provider_error = urllib.error.HTTPError(
+            "https://api.deepseek.com/chat/completions",
+            429,
+            "Too Many Requests",
+            None,
+            io.BytesIO(b"private provider response"),
+        )
+        try:
+            with patch("deepseek_budget_proxy.urllib.request.urlopen", side_effect=provider_error) as upstream:
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+                body = json.dumps({
+                    "model": "deepseek-flash",
+                    "messages": [{"role": "user", "content": "test"}],
+                    "max_tokens": 16,
+                    "stream": False,
+                })
+                connection.request(
+                    "POST",
+                    "/chat/completions",
+                    body,
+                    {"Authorization": "Bearer local-token", "Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                response_payload = json.loads(response.read())
+                self.assertEqual(response.status, 502)
+                self.assertEqual(response_payload["provider_status"], "429")
+                self.assertNotIn("private provider response", json.dumps(response_payload))
+                connection.close()
+
+                retry = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+                retry.request(
+                    "POST",
+                    "/chat/completions",
+                    body,
+                    {"Authorization": "Bearer local-token", "Content-Type": "application/json"},
+                )
+                retry_response = retry.getresponse()
+                self.assertEqual(retry_response.status, 400)
+                retry.close()
+                upstream.assert_called_once()
+
+            snapshot = server.ledger.snapshot()
+            self.assertEqual(snapshot["provider_http_errors"], {"429": 1})
+            self.assertEqual(snapshot["provider_transport_errors"], 0)
+            self.assertEqual(snapshot["api_calls"], 1)
+            self.assertEqual(snapshot["denied_calls"], 1)
+            self.assertEqual(snapshot["actual_spent_usd"], "0")
+            self.assertEqual(snapshot["failed_reserved_usd"], snapshot["spent_usd"])
+            self.assertEqual(snapshot["reserved_usd"], "0")
+            self.assertTrue(snapshot["failed"])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_transport_error_is_audited_without_leaking_network_details(self):
+        server, _thread = start_proxy(Decimal("0.01"), "provider-secret", "local-token")
+        try:
+            with patch(
+                "deepseek_budget_proxy.urllib.request.urlopen",
+                side_effect=urllib.error.URLError("private network detail"),
+            ):
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+                body = json.dumps({
+                    "model": "deepseek-flash",
+                    "messages": [{"role": "user", "content": "test"}],
+                    "max_tokens": 16,
+                    "stream": False,
+                })
+                connection.request(
+                    "POST",
+                    "/chat/completions",
+                    body,
+                    {"Authorization": "Bearer local-token", "Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                response_body = response.read().decode()
+                self.assertEqual(response.status, 502)
+                self.assertNotIn("private network detail", response_body)
+                connection.close()
+
+            snapshot = server.ledger.snapshot()
+            self.assertEqual(snapshot["provider_transport_errors"], 1)
+            self.assertEqual(snapshot["provider_http_errors"], {})
+            self.assertEqual(snapshot["failed_reserved_usd"], snapshot["spent_usd"])
+            self.assertTrue(snapshot["failed"])
         finally:
             server.shutdown()
             server.server_close()
@@ -269,6 +369,64 @@ class BudgetProxyTests(unittest.TestCase):
         finally:
             server.shutdown()
             server.server_close()
+
+    def test_failed_programmer_exit_keeps_a_durable_failure_audit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audit_path = Path(directory) / "audit.json"
+            response_body = json.dumps({
+                "choices": [{"message": {"content": "OK"}}],
+                "usage": {"prompt_tokens": 50, "completion_tokens": 2},
+            }).encode()
+            child_request = """
+import json, os, urllib.request
+body = json.dumps({
+    "model": "deepseek-flash",
+    "messages": [{"role": "user", "content": "test"}],
+    "max_tokens": 16,
+    "stream": False,
+}).encode()
+request = urllib.request.Request(
+    os.environ["DEEPSEEK_API_BASE"] + "/chat/completions",
+    data=body,
+    headers={
+        "Authorization": "Bearer " + os.environ["DEEPSEEK_API_KEY"],
+        "Content-Type": "application/json",
+    },
+)
+urllib.request.urlopen(request, timeout=5).read()
+raise SystemExit(7)
+"""
+            with patch(
+                "deepseek_budget_proxy.urllib.request.urlopen",
+                return_value=FakeResponse(response_body),
+            ):
+                result = run_aider(
+                    Decimal("0.01"),
+                    "provider-secret",
+                    audit_path,
+                    [sys.executable, "-c", child_request],
+                )
+            audit = json.loads(audit_path.read_text())
+
+        self.assertEqual(result, 1)
+        self.assertEqual(audit["api_calls"], 1)
+        self.assertTrue(audit["failed"])
+        self.assertTrue(audit["all_reservations_settled"])
+        self.assertEqual(audit["actual_spent_usd"], "0.0000174")
+        self.assertEqual(audit["failed_reserved_usd"], "0")
+        self.assertNotIn("provider-secret", json.dumps(audit))
+
+    def test_audit_persistence_failure_prevents_a_success_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            blocker = Path(directory) / "not-a-directory"
+            blocker.write_text("block", encoding="utf-8")
+            with self.assertRaises(OSError):
+                run_aider(
+                    Decimal("0.01"),
+                    "provider-secret",
+                    blocker / "audit.json",
+                    [sys.executable, "-c", "pass"],
+                )
 
 
 if __name__ == "__main__":

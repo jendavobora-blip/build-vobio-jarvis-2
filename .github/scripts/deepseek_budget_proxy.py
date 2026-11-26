@@ -147,11 +147,16 @@ class BudgetLedger:
         self.limit = limit
         self.state_path = state_path
         self.spent = Decimal(0)
+        self.actual_spent = Decimal(0)
+        self.failed_reserved = Decimal(0)
         self.reserved = Decimal(0)
         self.calls = 0
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.denied_calls = 0
+        self.provider_http_errors: dict[str, int] = {}
+        self.provider_transport_errors = 0
+        self.provider_response_errors: dict[str, int] = {}
         self.failed = False
         self.blocked = False
         self._reservations: dict[str, Decimal] = {}
@@ -161,7 +166,7 @@ class BudgetLedger:
     def reserve(self, amount: Decimal) -> str:
         denied = False
         with self._lock:
-            if self.blocked or self.calls >= MAX_API_CALLS or self.spent + self.reserved + amount > self.limit:
+            if self.failed or self.blocked or self.calls >= MAX_API_CALLS or self.spent + self.reserved + amount > self.limit:
                 self.denied_calls += 1
                 self.blocked = True
                 denied = True
@@ -187,10 +192,35 @@ class BudgetLedger:
             reservation = self._reservations.pop(reservation_id)
             self.reserved -= reservation
             self.spent += charge
+            if failed:
+                self.failed_reserved += charge
+            else:
+                self.actual_spent += charge
             self.prompt_tokens += prompt_tokens
             self.completion_tokens += completion_tokens
             self.failed = self.failed or failed or charge > reservation
             self.blocked = self.blocked or charge > reservation
+        self._persist()
+
+    def record_provider_http_error(self, status_code: int) -> None:
+        with self._lock:
+            status = str(status_code)
+            self.provider_http_errors[status] = self.provider_http_errors.get(status, 0) + 1
+            self.failed = True
+        self._persist()
+
+    def record_provider_transport_error(self) -> None:
+        with self._lock:
+            self.provider_transport_errors += 1
+            self.failed = True
+        self._persist()
+
+    def record_provider_response_error(self, category: str) -> None:
+        if category not in ("oversized", "invalid_json", "usage_missing"):
+            raise ValueError("Unsupported provider response error category.")
+        with self._lock:
+            self.provider_response_errors[category] = self.provider_response_errors.get(category, 0) + 1
+            self.failed = True
         self._persist()
 
     def mark_failed(self) -> None:
@@ -210,9 +240,14 @@ class BudgetLedger:
                 "denied_calls": self.denied_calls,
                 "budget_limit_usd": format_usd(self.limit),
                 "spent_usd": format_usd(self.spent),
+                "actual_spent_usd": format_usd(self.actual_spent),
+                "failed_reserved_usd": format_usd(self.failed_reserved),
                 "reserved_usd": format_usd(self.reserved),
                 "prompt_tokens": self.prompt_tokens,
                 "completion_tokens": self.completion_tokens,
+                "provider_http_errors": dict(self.provider_http_errors),
+                "provider_transport_errors": self.provider_transport_errors,
+                "provider_response_errors": dict(self.provider_response_errors),
                 "failed": self.failed,
                 "blocked": self.blocked,
                 "all_reservations_settled": self.reserved == 0,
@@ -222,8 +257,18 @@ class BudgetLedger:
 def write_audit(path: Path, ledger: BudgetLedger) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(ledger.snapshot(), sort_keys=True), encoding="utf-8")
-    temporary.replace(path)
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(descriptor, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as audit_file:
+        audit_file.write(json.dumps(ledger.snapshot(), sort_keys=True))
+        audit_file.flush()
+        os.fsync(audit_file.fileno())
+    os.replace(temporary, path)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def create_handler(ledger: BudgetLedger, api_key: str, local_token: str):
@@ -280,12 +325,29 @@ def create_handler(ledger: BudgetLedger, api_key: str, local_token: str):
             try:
                 with urllib.request.urlopen(upstream, timeout=60) as response:
                     response_body = response.read(MAX_RESPONSE_BYTES + 1)
-            except (OSError, urllib.error.URLError, urllib.error.HTTPError):
+            except urllib.error.HTTPError as error:
+                try:
+                    error.close()
+                except OSError:
+                    pass
+                ledger.record_provider_http_error(error.code)
                 ledger.settle(reservation_id, reservation, failed=True)
-                self._json(502, {"error": "Volání DeepSeek selhalo; rezervovaný limit byl započten."})
+                self._json(
+                    502,
+                    {
+                        "error": "Volání DeepSeek selhalo; rezervovaný limit byl započten.",
+                        "provider_status": str(error.code),
+                    },
+                )
+                return
+            except (OSError, urllib.error.URLError):
+                ledger.record_provider_transport_error()
+                ledger.settle(reservation_id, reservation, failed=True)
+                self._json(502, {"error": "Přenos k DeepSeek selhal; rezervovaný limit byl započten."})
                 return
 
             if len(response_body) > MAX_RESPONSE_BYTES:
+                ledger.record_provider_response_error("oversized")
                 ledger.settle(reservation_id, reservation, failed=True)
                 self._json(502, {"error": "Odpověď DeepSeek překročila limit."})
                 return
@@ -306,7 +368,13 @@ def create_handler(ledger: BudgetLedger, api_key: str, local_token: str):
                     or not choices
                 ):
                     raise ValueError("Missing or invalid provider usage.")
-            except (UnicodeDecodeError, json.JSONDecodeError, AttributeError, ValueError):
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                ledger.record_provider_response_error("invalid_json")
+                ledger.settle(reservation_id, reservation, failed=True)
+                self._json(502, {"error": "Odpověď DeepSeek není platný JSON."})
+                return
+            except (AttributeError, ValueError):
+                ledger.record_provider_response_error("usage_missing")
                 ledger.settle(reservation_id, reservation, failed=True)
                 self._json(502, {"error": "Odpověď DeepSeek nemá ověřitelné údaje o spotřebě."})
                 return
@@ -432,8 +500,14 @@ def print_audit(ledger: BudgetLedger) -> None:
         "DeepSeek rozpočtový audit: "
         f"volání={snapshot['api_calls']}, "
         f"odmítnutá_volání={snapshot['denied_calls']}, "
+        f"celkem_započteno_usd={snapshot['spent_usd']}, "
+        f"skutečná_spotřeba_usd={snapshot['actual_spent_usd']}, "
+        f"rezervace_při_chybe_usd={snapshot['failed_reserved_usd']}, "
         f"vstupní_tokeny={snapshot['prompt_tokens']}, "
         f"výstupní_tokeny={snapshot['completion_tokens']}, "
+        f"HTTP_chyby={snapshot['provider_http_errors']}, "
+        f"transportní_chyby={snapshot['provider_transport_errors']}, "
+        f"chyby_odpovědi={snapshot['provider_response_errors']}, "
         f"selhání={snapshot['failed']}, "
         f"všechna_rezervování_vypořádána={snapshot['all_reservations_settled']}"
     )
