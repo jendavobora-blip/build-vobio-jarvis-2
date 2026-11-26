@@ -31,9 +31,9 @@ test("GitHub route coalesces concurrent requests and shares the outbound quota a
   assert.ok(responses.every((response) => response.status === 200))
   assert.equal(outbound, 2)
 
-  for (let index = 0; index < 19; index += 1) {
+  for (let index = 0; index < 9; index += 1) {
     assert.equal((await GET(request(`unique-${index}`, `192.0.2.${index + 20}`))).status, 200)
   }
   assert.equal((await GET(request("one-too-many", "192.0.2.99"))).status, 429)
-  assert.equal(outbound, 40)
+  assert.equal(outbound, 20)
 })

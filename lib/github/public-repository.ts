@@ -59,10 +59,12 @@ export function isValidRepositoryPath(owner: string, repository: string): boolea
 async function requestGitHubJson(
   path: string,
   fetcher: typeof fetch,
+  beforeRequest: () => Promise<void>,
   emptyCommits = false,
 ): Promise<unknown> {
   let response: Response
   try {
+    await beforeRequest()
     response = await fetcher(`https://api.github.com${path}`, {
       headers: {
         Accept: "application/vnd.github+json",
@@ -71,7 +73,8 @@ async function requestGitHubJson(
       signal: AbortSignal.timeout(8_000),
       next: { revalidate: 60 },
     })
-  } catch {
+  } catch (error) {
+    if (error instanceof GitHubRepositoryError) throw error
     throw new GitHubRepositoryError(502, "GitHub API není dostupné.")
   }
 
@@ -108,13 +111,14 @@ export async function getPublicGitHubRepository(
   owner: string,
   repository: string,
   fetcher: typeof fetch = fetch,
+  beforeRequest: () => Promise<void> = async () => {},
 ): Promise<PublicGitHubRepository> {
   if (!isValidRepositoryPath(owner, repository)) {
     throw new GitHubRepositoryError(400, "Zadejte platného vlastníka a název repozitáře GitHub.")
   }
 
   const path = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}`
-  const repositoryPayload = repositorySchema.safeParse(await requestGitHubJson(path, fetcher))
+  const repositoryPayload = repositorySchema.safeParse(await requestGitHubJson(path, fetcher, beforeRequest))
   if (!repositoryPayload.success || repositoryPayload.data.private || !isGitHubUrl(repositoryPayload.data.html_url)) {
     if (repositoryPayload.success && repositoryPayload.data.private) {
       throw new GitHubRepositoryError(404, "Veřejný repozitář nebyl nalezen.")
@@ -123,7 +127,7 @@ export async function getPublicGitHubRepository(
   }
 
   const commitsPayload = commitsSchema.safeParse(
-    await requestGitHubJson(`${path}/commits?per_page=5`, fetcher, true),
+    await requestGitHubJson(`${path}/commits?per_page=5`, fetcher, beforeRequest, true),
   )
   if (!commitsPayload.success || commitsPayload.data.some((commit) => !isGitHubUrl(commit.html_url))) {
     throw new GitHubRepositoryError(502, "GitHub API vrátilo neplatné údaje o commitech.")

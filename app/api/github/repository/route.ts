@@ -31,14 +31,15 @@ export async function GET(request: Request) {
     const result = await singleFlightGitHubRepository(key, async () => {
       const cachedAgain = cachedGitHubRepository(key)
       if (cachedAgain) return cachedAgain
-      let quota
-      try {
-        quota = await rateLimit("github-public-shared-quota", 20, 60 * 60_000)
-      } catch {
-        throw new GitHubRepositoryError(503, "Sdílená ochrana GitHub API není dostupná.")
-      }
-      if (!quota.ok) throw new GitHubRepositoryError(429, "Sdílený limit GitHub API byl vyčerpán.")
-      const fetched = await getPublicGitHubRepository(owner, repository)
+      const fetched = await getPublicGitHubRepository(owner, repository, fetch, async () => {
+        let quota
+        try {
+          quota = await rateLimit("github-public-shared-quota", 20, 60 * 60_000)
+        } catch {
+          throw new GitHubRepositoryError(503, "Sdílená ochrana GitHub API není dostupná.")
+        }
+        if (!quota.ok) throw new GitHubRepositoryError(429, "Sdílený limit GitHub API byl vyčerpán.")
+      })
       storeCachedGitHubRepository(key, fetched)
       return fetched
     })
