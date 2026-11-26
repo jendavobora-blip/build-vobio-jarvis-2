@@ -167,8 +167,10 @@ async function postChat(opts: RawChatOptions): Promise<RawChatResult> {
   if (
     typeof envelope.usage !== "object" ||
     envelope.usage === null ||
-    typeof (envelope.usage as { prompt_tokens?: unknown }).prompt_tokens !== "number" ||
-    typeof (envelope.usage as { completion_tokens?: unknown }).completion_tokens !== "number"
+    !Number.isSafeInteger((envelope.usage as { prompt_tokens?: unknown }).prompt_tokens) ||
+    !Number.isSafeInteger((envelope.usage as { completion_tokens?: unknown }).completion_tokens) ||
+    (envelope.usage as { prompt_tokens: number }).prompt_tokens < 0 ||
+    (envelope.usage as { completion_tokens: number }).completion_tokens < 0
   ) {
     throw new DeepSeekError("DeepSeek nevrátil platné údaje o spotřebě.", false)
   }
@@ -180,7 +182,10 @@ async function postChat(opts: RawChatOptions): Promise<RawChatResult> {
   const promptTokens = usagePayload.prompt_tokens
   const completionTokens = usagePayload.completion_tokens
   const cacheHitTokens =
-    typeof usagePayload.prompt_cache_hit_tokens === "number" ? usagePayload.prompt_cache_hit_tokens : 0
+    Number.isSafeInteger(usagePayload.prompt_cache_hit_tokens) &&
+    (usagePayload.prompt_cache_hit_tokens as number) >= 0 &&
+    (usagePayload.prompt_cache_hit_tokens as number) <= promptTokens
+      ? usagePayload.prompt_cache_hit_tokens as number : 0
   const usage: Usage = {
     promptTokens,
     completionTokens,
@@ -238,7 +243,7 @@ export async function callChat(opts: RawChatOptions): Promise<ChatCallResult> {
       return { ...result, usage: totalUsage, attempts: attempt }
     } catch (error) {
       lastError = error instanceof DeepSeekError ? error : new DeepSeekError("Neznámá chyba při volání modelu.", false)
-      if (!lastError.retryable) break
+      break
     }
     if (attempt < MAX_ATTEMPTS && !opts.signal.aborted) {
       await new Promise((r) => setTimeout(r, 600 * attempt))
@@ -281,7 +286,7 @@ export async function callChatJson<T>(
       }
     } catch (error) {
       lastError = error instanceof DeepSeekError ? error : new DeepSeekError("Neznámá chyba při volání modelu.", false)
-      if (!lastError.retryable) break
+      break
     }
     if (attempt < MAX_ATTEMPTS && !opts.signal.aborted) {
       await new Promise((r) => setTimeout(r, 600 * attempt))

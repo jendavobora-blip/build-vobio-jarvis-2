@@ -15,6 +15,7 @@ import { DeepSeekError } from "@/lib/server/deepseek"
 import { SPECIALISTS } from "@/lib/jarvis/agents"
 import type { ChatRequestBody, RunEvent } from "@/lib/jarvis/types"
 import { hasValidRequestOrigin } from "@/lib/server/request-security"
+import { preserveUsageForSettlement, settleBudgetUsage } from "@/lib/server/usage-settlement"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -122,17 +123,20 @@ export async function POST(request: Request) {
         }
       }, 15_000)
 
-      let spent = { costUsd: 0, tokens: 0 }
+      let spent = { costUsd: 0, tokens: 0, usageKnown: false }
+      let providerUncertain = false
       let auditRunId: string | undefined
       try {
         const total = await runOrchestration({
           body: parsed,
           emit: (event) => {
             if (event.type === "run_start") auditRunId = event.runId
+            if (event.type === "agent_error") providerUncertain = true
             if (event.type === "usage") {
               spent = {
                 costUsd: event.total.costUsd,
                 tokens: event.total.promptTokens + event.total.completionTokens,
+                usageKnown: true,
               }
             }
             emit(event)
@@ -141,15 +145,10 @@ export async function POST(request: Request) {
           limits,
           audit: (event) => recordOrchestrationAuditEvent(user.ownerId, user.id, event),
         })
-        spent = { costUsd: total.costUsd, tokens: total.promptTokens + total.completionTokens }
+        spent = { costUsd: total.costUsd, tokens: total.promptTokens + total.completionTokens, usageKnown: !providerUncertain }
       } catch (error) {
-        const usage = (error as { usage?: { costUsd?: number; promptTokens?: number; completionTokens?: number } }).usage
-        if (usage) {
-          spent = {
-            costUsd: Math.max(0, usage.costUsd ?? 0),
-            tokens: Math.max(0, (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0)),
-          }
-        }
+        spent = preserveUsageForSettlement(spent, error)
+        if (!(error instanceof OrchestrationAuditError) || providerUncertain) spent.usageKnown = false
         if (auditRunId) {
           try {
             const failureReason: OrchestrationFailureReason = abort.signal.aborted
@@ -182,7 +181,7 @@ export async function POST(request: Request) {
       } finally {
         clearInterval(heartbeat)
         try {
-          await settleDailyBudget(reservationId, spent.costUsd, spent.tokens)
+          await settleBudgetUsage(reservationId, spent, settleDailyBudget)
         } catch (error) {
           console.error("[jarvis] budget settlement failed", error instanceof Error ? error.message : "unknown error")
         }
