@@ -4,101 +4,190 @@ on:
   workflow_dispatch:
     inputs:
       task:
-        description: "Co ma DeepSeek naprogramovat?"
+        description: Co ma DeepSeek naprogramovat?
         required: true
         type: string
         default: >-
-          Faze 1: Uprav VOBIO JARVIS na moderni ceske mobilni velitelske centrum
-          s 9 interaktivnimi obrazovkami, sedmi rolemi agentu, katalogem 20 projektu
-          a plynulym holografickym HUD. Zachovej funkcni backend a prihlasovani.
-          Neaktivuj AI backend, placene sluzby ani produkcni nasazeni.
-          Priprav funkcni design k memu schvaleni.
+          Pokracuj v PR #1 od posledniho commitu.
+          Dokonci skutecne tool calling, opravneni
+          agentu a audit behu. Udelej kod i testy,
+          ne jen dalsi plan.
+      povoluji_placene_api:
+        description: Potvrzuji placene volani DeepSeek API
+        required: true
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: vobio-deepseek-coder
   cancel-in-progress: false
 
 jobs:
-  coder:
+  programator:
+    if: ${{ inputs.povoluji_placene_api == true }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    steps:
-      - name: Overit dostupnost API klice
-        env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        run: |
-          if [ -z "$DEEPSEEK_API_KEY" ]; then
-            echo "Chybi repository secret DEEPSEEK_API_KEY" >&2
-            exit 1
-          fi
 
-      - name: Stahnout projekt
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Nacist posledni kod PR 1
         uses: actions/checkout@v4
         with:
-          persist-credentials: true
+          ref: feat/jarvis-first-stage
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Python
+      - name: Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Nainstalovat open-source programatora Aider
-        run: python -m pip install --disable-pip-version-check --no-cache-dir aider-chat
+      - name: Nainstalovat Aider
+        run: |
+          python -m pip install --disable-pip-version-check aider-chat==0.86.2
 
-      - name: DeepSeek upravi zdrojovy kod
+      - name: DeepSeek naprogramuje dalsi etapu
         env:
           OPENAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          OPENAI_API_BASE: https://api.deepseek.com
+          OPENAI_API_BASE: https://api.deepseek.com/v1
+          AIDER_ENV_FILE: /dev/null
           TASK: ${{ inputs.task }}
+        shell: bash
         run: |
-          cat > /tmp/agent-instructions.txt <<'INSTRUCTIONS'
-          Jsi senior programator projektu VOBIO JARVIS, autor Jan Vobora.
-          Proved skutecne upravy kodu v tomto Next.js/TypeScript repozitari.
-          Zacni designem, nikdy nezapinej placene sluzby, AI backend, ani produkcni nasazeni.
-          Zachovej fungujici autentizaci, API, historii a existujici data.
-          Mobilni rozhrani musi fungovat na iPhonu, v cestine a s pristupnosti.
-          Neprepisuj .github/workflows ani jakekoliv tajne klice. Nevypisuj environment variables.
-          Role AI agentu: Router, Researcher, Architect, Coder, Analyst, Critic, Final Judge.
-          Devet obrazovek: Velin, Agenti, Orchestrace, Projekty, Automatizace,
-          Hlas, Pamet, Analytika, Nastaveni. Katalog 20 projektu.
-          3D HUD ma byt adaptivni, podporovat prefers-reduced-motion a cilit na 60 FPS.
-          Zmeny priprav jako design/prototyp ke schvaleni, ne produkcni release.
-          Pokud muzes, vytvor docs/DESIGN_REVIEW.md s popisem skutecne dokoncenych zmen.
-          Pouzivej existujici knihovny a neprovadej obchodovani ani financni transakce.
+          set -euo pipefail
+
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "Chybi Secret DEEPSEEK_API_KEY" >&2
+            exit 1
+          fi
+
+          cat > /tmp/task.txt <<'INSTRUCTIONS'
+          Jsi autonomni programator VOBIO JARVIS.
+
+          Navaz na existujici PR #1.
+          Respektuj AGENTS.md a IMPLEMENTATION_PLAN.md.
+
+          Implementuj skutecne funkcni kod.
+          Dokonci jednu overitelnou vyvojovou etapu.
+          Pridej automaticke testy.
+
+          Neopakuj dokoncene ukoly.
+          Neaktivuj produkci ani zivy AI backend.
+          Nemen GitHub Actions ani tajne klice.
+          Neupravuj .env ani produkcni konfiguraci.
+          Nemen zavislosti bez schvaleni.
+          Nespoustej shell prikazy.
+
+          Prioritne dokonci:
+          - Multiagentni orchestraci
+          - Skutecne tool calling
+          - Audit a opravneni agentu
+          - Development Studio
+          - Bezpecne kodovaci agenty
+
+          Pokud nelze vse stihnout, dokonci nejblizsi
+          smysluplnou etapu a popis dalsi krok.
           INSTRUCTIONS
-          printf '\nUZIVATELUV UKOL:\n%s\n' "$TASK" >> /tmp/agent-instructions.txt
+
+          printf '\nUKOL:\n%s\n' "$TASK" >> /tmp/task.txt
+
           aider \
             --model openai/deepseek-flash \
-            --edit-format whole \
-            --message-file /tmp/agent-instructions.txt \
-            --yes --no-auto-commits --no-stream
+            --message-file /tmp/task.txt \
+            --read AGENTS.md \
+            --no-auto-commits \
+            --no-suggest-shell-commands \
+            --no-auto-test \
+            --no-auto-lint \
+            --no-stream \
+            --yes-always \
+            app/api/chat/route.ts \
+            lib/server/orchestrator.ts \
+            lib/server/deepseek.ts \
+            lib/jarvis/agents.ts \
+            tests/orchestrator.integration.ts \
+            docs/IMPLEMENTATION_PLAN.md
 
-      - name: Overit zmeny
-        run: git diff --check
+      - name: Bezpecnostni kontrola zmen
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+
+          python - <<'PY'
+          import os
+          import subprocess
+
+          modified = subprocess.check_output(
+              ['git', 'diff', '--name-only', '-z', 'HEAD']
+          ).decode().split('\0')
+
+          untracked = subprocess.check_output(
+              ['git', 'ls-files', '--others',
+               '--exclude-standard', '-z']
+          ).decode().split('\0')
+
+          allowed = (
+              'app/', 'components/', 'hooks/',
+              'lib/', 'tests/', 'docs/'
+          )
+
+          for path in set(modified + untracked) - {''}:
+              if not path.startswith(allowed):
+                  raise SystemExit(
+                      f'Nepovolena zmena: {path}'
+                  )
+              if os.path.islink(path):
+                  raise SystemExit(
+                      f'Nepovoleny symlink: {path}'
+                  )
+
+          print('Bezpecnostni kontrola prosla')
+          PY
+
+      - name: Nainstalovat pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.3.4
+          run_install: false
+
+      - name: Nastavit Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Automaticke testovani
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm test
+          pnpm test:integration
+          pnpm typecheck
+          pnpm build
 
       - name: Vytvorit Pull Request ke schvaleni
         uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          branch: ai/deepseek-jarvis-design
-          commit-message: "feat: design prototype by DeepSeek agent"
-          title: "VOBIO JARVIS: navrh zmen od DeepSeek"
+          base: feat/jarvis-first-stage
+          branch: ai/deepseek-vobio-navrh
+          draft: true
+          commit-message: 'feat: DeepSeek navrh pro VOBIO'
+          title: 'VOBIO JARVIS - DeepSeek navrh'
           body: |
-            AI agent pripravil navrh zmen. Zkontroluj prosim design, zmeny
-            a bezpecnost pred kliknutim Merge. Produkce se nenasazuje automaticky.
+            Navazuje na existujici PR #1.
+            Zmeny byly pripraveny AI agentem.
+            Pred sloucenim zkontrolovat kod a testy.
+            Produkce nebyla nasazena.
           add-paths: |
             app
             components
             hooks
             lib
-            public
+            tests
             docs
-            package.json
-            pnpm-lock.yaml
-            next.config.mjs
-            tsconfig.json
-            README.md
