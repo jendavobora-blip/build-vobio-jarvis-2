@@ -2,10 +2,12 @@ import "server-only"
 import { z } from "zod"
 import { callChat, callChatJson, callJson, DeepSeekError, MAX_ATTEMPTS, type ChatMessage } from "./deepseek"
 import { plannerSystem, specialistSystem, synthesisSystem } from "./prompts"
-import { executeSearchMemory, SEARCH_MEMORY_TOOL, TOOL_NAME, ToolError } from "./tools"
+import { executeSearchMemory, SEARCH_MEMORY_TOOL, ToolError } from "./tools"
 import { AGENTS, QUICK_MAX_SPECIALISTS, SPECIALISTS } from "@/lib/jarvis/agents"
 import { addUsage, emptyUsage, worstCaseCost } from "@/lib/jarvis/pricing"
 import { retrieveMemories } from "@/lib/jarvis/retrieval"
+import { isToolAllowed } from "./tool-permissions"
+import type { OrchestrationAuditEvent, OrchestrationFailureReason } from "./db"
 import type {
   AgentId,
   AgentOutput,
@@ -51,6 +53,7 @@ interface RunContext {
   emit: Emit
   signal: AbortSignal
   limits: { maxTokens: number; maxCostUsd: number }
+  audit: (event: OrchestrationAuditEvent) => Promise<void>
 }
 
 const now = () => Date.now()
@@ -121,11 +124,23 @@ function fallbackSelection(body: ChatRequestBody, limit: number): { agent: Speci
     .map((agent) => ({ agent, task: `${AGENTS[agent].role} pro zadaný úkol.` }))
 }
 
-export async function runOrchestration({ body, emit, signal, limits }: RunContext): Promise<Usage> {
+export async function runOrchestration({ body, emit, signal, limits, audit }: RunContext): Promise<Usage> {
   let total = emptyUsage()
   const start = now()
   const runId = crypto.randomUUID()
   let budgetStopped = false
+  let modelFailed = false
+  let toolCallFailed = false
+  const auditWithUsage = async (event: OrchestrationAuditEvent) => {
+    try {
+      await audit(event)
+    } catch (error) {
+      const auditError = error instanceof Error ? error : new Error("Zápis auditu orchestrace selhal.")
+      Object.assign(auditError, { usage: total })
+      throw auditError
+    }
+  }
+  await auditWithUsage({ runId, agentId: "orchestrator", event: "run_started" })
 
   let inFlightTokens = 0
   let inFlightCost = 0
@@ -162,6 +177,12 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
   }
 
   emit({ type: "run_start", runId, model: body.model, depth: body.depth, at: now() })
+  if (signal.aborted) {
+    await auditWithUsage({ runId, agentId: "orchestrator", event: "run_failed", failureReason: "aborted" })
+    emit({ type: "error", message: "Požadavek byl zrušen.", at: now() })
+    emit({ type: "done", durationMs: now() - start, at: now() })
+    return total
+  }
 
   /* 1. Memory retrieval (local, free) */
   const memoryEnabled = body.enabledAgents.includes("memory")
@@ -232,6 +253,7 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
       })
       track(first.usage)
     } catch (error) {
+      modelFailed = true
       const usage = (error as { usage?: Usage }).usage
       if (usage) track(usage)
       const message = error instanceof DeepSeekError ? error.message : "Volání nástroje selhalo."
@@ -272,7 +294,9 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
     }
 
     if (first.toolCalls.length !== 1) {
+      toolCallFailed = true
       const message = `Odmítnuto: model požadoval ${first.toolCalls.length} tool_calls; povoleno je nejvýše jedno.`
+      await auditWithUsage({ runId, agentId: "memory", event: "tool_denied", toolName: "multiple_tool_calls" })
       emit({ type: "agent_error", agent: "memory", message, attempts: first.attempts, at: now() })
       emit({
         type: "agent_status",
@@ -293,9 +317,14 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
     // Exactly one tool call may enter this execution round.
     const call = first.toolCalls[0]
     const fn = call.function
-    if (fn.name !== TOOL_NAME) {
+    const toolAllowed = isToolAllowed("memory", fn.name)
+    const auditToolName = toolAllowed ? fn.name : "unknown_tool"
+    await auditWithUsage({ runId, agentId: "memory", event: "tool_requested", toolName: auditToolName })
+    if (!toolAllowed) {
       toolFailed = true
-      const message = `Neznámý nebo nepovolený nástroj: ${fn.name}`
+      toolCallFailed = true
+      const message = "Nepovolený nebo neznámý nástroj byl odmítnut."
+      await auditWithUsage({ runId, agentId: "memory", event: "tool_denied", toolName: auditToolName })
       emit({ type: "agent_error", agent: "memory", message, attempts: first.attempts, at: now() })
       emit({
         type: "agent_status",
@@ -307,20 +336,13 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
       })
       toolMessages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: message }) })
     } else {
+      let outcome: ReturnType<typeof executeSearchMemory> | undefined
       try {
-        const outcome = executeSearchMemory(body.memories, fn.arguments)
-        matchCount = outcome.matches
-        emit({
-          type: "agent_status",
-          agent: "memory",
-          status: "thinking",
-          task: "Tool: search_memory",
-          activity: `search_memory: ${outcome.matches} výsledků`,
-          at: now(),
-        })
-        toolMessages.push({ role: "tool", tool_call_id: call.id, content: outcome.content })
+        outcome = executeSearchMemory(body.memories, fn.arguments)
       } catch (error) {
         toolFailed = true
+        toolCallFailed = true
+        await auditWithUsage({ runId, agentId: "memory", event: "tool_failed", toolName: auditToolName })
         const message = error instanceof ToolError ? error.message : "Nástroj search_memory selhal."
         emit({ type: "agent_error", agent: "memory", message, attempts: first.attempts, at: now() })
         emit({
@@ -332,6 +354,19 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
           at: now(),
         })
         toolMessages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: message }) })
+      }
+      if (outcome) {
+        await auditWithUsage({ runId, agentId: "memory", event: "tool_succeeded", toolName: auditToolName })
+        matchCount = outcome.matches
+        emit({
+          type: "agent_status",
+          agent: "memory",
+          status: "thinking",
+          task: "Tool: search_memory",
+          activity: `search_memory: ${outcome.matches} výsledků`,
+          at: now(),
+        })
+        toolMessages.push({ role: "tool", tool_call_id: call.id, content: outcome.content })
       }
     }
 
@@ -394,6 +429,7 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
       })
       return context
     } catch (error) {
+      modelFailed = true
       const usage = (error as { usage?: Usage }).usage
       if (usage && usage.promptTokens) track(usage)
       const message = error instanceof DeepSeekError ? error.message : "Dokončení nástroje selhalo."
@@ -481,6 +517,7 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
         selected = [...tasks.entries()].slice(0, limit).map(([agent, task]) => ({ agent, task }))
       }
     } catch (error) {
+      modelFailed = true
       const usage = (error as { usage?: Usage }).usage
       if (usage) track(usage)
       if (error instanceof DeepSeekError && error.fatal) {
@@ -493,6 +530,7 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
       planReservation()
     }
   } else {
+    budgetStopped = true
     rationale = "Rozpočet nestačí na plánovací krok – použit záložní výběr."
   }
 
@@ -574,6 +612,7 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
       })
       emit({ type: "agent_status", agent, status: "done", task, activity: "Hotovo", at: now() })
     } catch (error) {
+      modelFailed = true
       const usage = (error as { usage?: Usage }).usage
       if (usage && usage.promptTokens) track(usage)
       const message = error instanceof DeepSeekError ? error.message : "Agent selhal."
@@ -601,6 +640,8 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
   }
 
   /* 4. Synthesis */
+  let finalResult: FinalAnswer | undefined
+  let synthesized = false
   if (!signal.aborted) {
     const done = Object.keys(outputs) as AgentId[]
     for (const id of done) emit({ type: "link", from: id, to: "final_judge", at: now() })
@@ -632,8 +673,10 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
         )
         track(synth.usage)
         result = synth.data
+        synthesized = true
         emit({ type: "agent_status", agent: "final_judge", status: "done", task: "Finální kontrola", activity: "Odpověď připravena", at: now() })
       } catch (error) {
+        modelFailed = true
         const usage = (error as { usage?: Usage }).usage
         if (usage && usage.promptTokens) track(usage)
         const message = error instanceof DeepSeekError ? error.message : "Syntéza selhala."
@@ -658,9 +701,34 @@ export async function runOrchestration({ body, emit, signal, limits }: RunContex
       }
       emit({ type: "agent_status", agent: "final_judge", status: "done", task: "Záložní výstup", activity: "Zobrazeny dílčí výsledky", at: now() })
     }
-    if (result) emit({ type: "final", result, at: now() })
-    else if (!budgetStopped) emit({ type: "error", message: "Nepodařilo se získat žádný výsledek.", at: now() })
-    else emit({ type: "error", message: "Rozpočet požadavku byl vyčerpán dříve, než vznikl výsledek. Zvyšte limit v nastavení.", at: now() })
+    finalResult = result
+  }
+
+  const failureReason: OrchestrationFailureReason | undefined = signal.aborted
+    ? "aborted"
+    : budgetStopped
+      ? "budget_exceeded"
+      : toolCallFailed
+        ? "tool_error"
+        : modelFailed
+          ? "model_error"
+          : !synthesized
+            ? "no_result"
+            : undefined
+  if (failureReason) {
+    await auditWithUsage({ runId, agentId: "orchestrator", event: "run_failed", failureReason })
+    const message =
+      failureReason === "budget_exceeded"
+        ? "Rozpočet požadavku byl vyčerpán dříve, než vznikl úplný výsledek."
+        : failureReason === "aborted"
+          ? "Požadavek byl zrušen."
+          : failureReason === "no_result"
+            ? "Nepodařilo se získat žádný výsledek."
+            : "Orchestrace nedokončila všechny kroky úspěšně."
+    emit({ type: "error", message, at: now() })
+  } else {
+    await auditWithUsage({ runId, agentId: "orchestrator", event: "run_completed" })
+    if (finalResult) emit({ type: "final", result: finalResult, at: now() })
   }
 
   emit({ type: "done", durationMs: now() - start, at: now() })

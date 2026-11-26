@@ -11,6 +11,8 @@ import {
   installDatabaseAdapterForTesting,
   isActiveAccount,
   listMemories,
+  listOrchestrationAudit,
+  recordOrchestrationAuditEvent,
   redeemAccountInvite,
   reserveDailyBudget,
   restoreOwnerMemoriesFromBackup,
@@ -157,6 +159,100 @@ test("PostgreSQL invitations are single-use and tenant-scoped", async () => {
   await createAccountInvite(owner, "expired@example.test", expiringId, expiringHash)
   await pool.query("UPDATE jarvis_account_invites SET expires_at = now() - interval '1 second' WHERE id = $1", [expiringId])
   assert.equal(await redeemAccountInvite(owner, "expired@example.test", expiringHash, randomUUID(), "unused"), undefined)
+})
+
+test("PostgreSQL orchestration audit is append-only, tenant-scoped, and omits prompt data", async () => {
+  const runId = randomUUID()
+  await recordOrchestrationAuditEvent(owner, member, {
+    runId,
+    agentId: "orchestrator",
+    event: "run_started",
+  })
+  await recordOrchestrationAuditEvent(owner, member, {
+    runId,
+    agentId: "memory",
+    event: "tool_requested",
+    toolName: "search_memory",
+  })
+  await recordOrchestrationAuditEvent(owner, member, {
+    runId,
+    agentId: "memory",
+    event: "tool_succeeded",
+    toolName: "search_memory",
+  })
+  await recordOrchestrationAuditEvent(owner, member, {
+    runId,
+    agentId: "orchestrator",
+    event: "run_completed",
+  })
+  await recordOrchestrationAuditEvent("5c5d6e7f-8091-4cad-9e2f-3a4b5c6d7e8f", member, {
+    runId: randomUUID(),
+    agentId: "orchestrator",
+    event: "run_started",
+  })
+
+  const tenantEvents = await listOrchestrationAudit(owner)
+  const memberEvents = await listOrchestrationAudit(owner, member)
+  assert.deepEqual(tenantEvents.map((event) => event.event).sort(), ["run_started", "tool_requested", "tool_succeeded", "run_completed"].sort())
+  assert.deepEqual(memberEvents.map((event) => event.event).sort(), ["run_started", "tool_requested", "tool_succeeded", "run_completed"].sort())
+  assert.ok(tenantEvents.every((event) => event.run_id === runId))
+  assert.ok(tenantEvents.every((event) => !("prompt" in event) && !("arguments" in event)))
+  assert.equal((await listOrchestrationAudit(owner, "another-member")).length, 0)
+  assert.equal((await listOrchestrationAudit("5c5d6e7f-8091-4cad-9e2f-3a4b5c6d7e8f")).length, 1)
+})
+
+test("PostgreSQL orchestration audit deduplicates concurrent events and preserves one terminal status", async () => {
+  const runId = randomUUID()
+  await recordOrchestrationAuditEvent(owner, member, {
+    runId,
+    agentId: "orchestrator",
+    event: "run_started",
+  })
+
+  await Promise.all(
+    Array.from({ length: 24 }, () =>
+      recordOrchestrationAuditEvent(owner, member, {
+        runId,
+        agentId: "orchestrator",
+        event: "run_failed",
+        failureReason: "budget_exceeded",
+      }),
+    ),
+  )
+
+  const rows = await pool.query(
+    "SELECT event, failure_reason FROM jarvis_orchestration_audit WHERE owner_id = $1 AND actor_id = $2 AND run_id = $3",
+    [owner, member, runId],
+  )
+  assert.equal(rows.rows.filter((row) => row.event === "run_failed").length, 1)
+  assert.equal(rows.rows.find((row) => row.event === "run_failed")?.failure_reason, "budget_exceeded")
+  await assert.rejects(
+    recordOrchestrationAuditEvent(owner, member, {
+      runId,
+      agentId: "orchestrator",
+      event: "run_completed",
+    }),
+    /Uložení auditní události/,
+  )
+})
+
+test("PostgreSQL audit writer reports database failures instead of succeeding silently", async () => {
+  const unavailable = (async () => {
+    throw new Error("simulated PostgreSQL outage")
+  }) as unknown as Parameters<typeof installDatabaseAdapterForTesting>[0]
+  installDatabaseAdapterForTesting(unavailable)
+  try {
+    await assert.rejects(
+      recordOrchestrationAuditEvent(owner, member, {
+        runId: randomUUID(),
+        agentId: "orchestrator",
+        event: "run_started",
+      }),
+      /Uložení auditní události orchestrace selhalo/,
+    )
+  } finally {
+    installDatabaseAdapterForTesting(adapter as unknown as Parameters<typeof installDatabaseAdapterForTesting>[0])
+  }
 })
 
 test("PostgreSQL rate limits and daily budget reservations are atomic under concurrency", async () => {

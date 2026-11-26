@@ -3,7 +3,13 @@ import { randomUUID } from "node:crypto"
 import { authenticatedUser } from "@/lib/server/auth"
 import { isLiveAvailable, serverConfig } from "@/lib/server/config"
 import { clientIp, rateLimit } from "@/lib/server/rate-limit"
-import { reserveDailyBudget, settleDailyBudget } from "@/lib/server/db"
+import {
+  OrchestrationAuditError,
+  recordOrchestrationAuditEvent,
+  reserveDailyBudget,
+  settleDailyBudget,
+  type OrchestrationFailureReason,
+} from "@/lib/server/db"
 import { runOrchestration } from "@/lib/server/orchestrator"
 import { DeepSeekError } from "@/lib/server/deepseek"
 import { SPECIALISTS } from "@/lib/jarvis/agents"
@@ -117,8 +123,24 @@ export async function POST(request: Request) {
       }, 15_000)
 
       let spent = { costUsd: 0, tokens: 0 }
+      let auditRunId: string | undefined
       try {
-        const total = await runOrchestration({ body: parsed, emit, signal: abort.signal, limits })
+        const total = await runOrchestration({
+          body: parsed,
+          emit: (event) => {
+            if (event.type === "run_start") auditRunId = event.runId
+            if (event.type === "usage") {
+              spent = {
+                costUsd: event.total.costUsd,
+                tokens: event.total.promptTokens + event.total.completionTokens,
+              }
+            }
+            emit(event)
+          },
+          signal: abort.signal,
+          limits,
+          audit: (event) => recordOrchestrationAuditEvent(user.ownerId, user.id, event),
+        })
         spent = { costUsd: total.costUsd, tokens: total.promptTokens + total.completionTokens }
       } catch (error) {
         const usage = (error as { usage?: { costUsd?: number; promptTokens?: number; completionTokens?: number } }).usage
@@ -128,8 +150,30 @@ export async function POST(request: Request) {
             tokens: Math.max(0, (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0)),
           }
         }
-        const message =
-          error instanceof DeepSeekError ? error.message : "Při zpracování došlo k neočekávané chybě. Zkuste to znovu."
+        if (auditRunId) {
+          try {
+            const failureReason: OrchestrationFailureReason = abort.signal.aborted
+              ? "aborted"
+              : error instanceof DeepSeekError
+                ? "model_error"
+                : error instanceof OrchestrationAuditError
+                  ? "audit_error"
+                  : "internal_error"
+            await recordOrchestrationAuditEvent(user.ownerId, user.id, {
+              runId: auditRunId,
+              agentId: "orchestrator",
+              event: "run_failed",
+              failureReason,
+            })
+          } catch (auditError) {
+            console.error("[jarvis] orchestration failure audit failed", auditError instanceof Error ? auditError.message : auditError)
+          }
+        }
+        const message = abort.signal.aborted
+          ? "Požadavek byl zrušen."
+          : error instanceof DeepSeekError
+            ? error.message
+            : "Při zpracování došlo k neočekávané chybě. Zkuste to znovu."
         if (!(error instanceof DeepSeekError)) {
           console.error("[jarvis] orchestration failed", error instanceof Error ? error.message : error)
         }

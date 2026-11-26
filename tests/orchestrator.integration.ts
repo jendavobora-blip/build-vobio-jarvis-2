@@ -74,6 +74,7 @@ test("Router delegates to legacy-compatible specialists and Final Judge returns 
     emit: (event) => events.push(event),
     signal: new AbortController().signal,
     limits: { maxTokens: 500_000, maxCostUsd: 5 },
+    audit: async () => {},
   })
   assert.ok(calls.some((system) => system.includes("Role: ROUTER")))
   assert.ok(calls.some((system) => system.includes("Role: RESEARCHER")))
