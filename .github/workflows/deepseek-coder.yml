@@ -67,6 +67,17 @@ jobs:
             exit 1
           fi
 
+          python - <<'PY'
+          import os
+
+          key = os.environ.get('DEEPSEEK_API_KEY', '')
+          if any(char.isspace() or not char.isprintable() for char in key):
+              raise SystemExit(
+                  'Secret DEEPSEEK_API_KEY obsahuje whitespace nebo '
+                  'neplatne znaky; znovu jej ulozte bez mezer a odradkovani.'
+              )
+          PY
+
           cat > /tmp/task.txt <<'INSTRUCTIONS'
           Jsi autonomni programator VOBIO JARVIS.
 
@@ -116,7 +127,18 @@ jobs:
             lib/server/deepseek.ts \
             lib/jarvis/agents.ts \
             tests/orchestrator.integration.ts \
-            docs/IMPLEMENTATION_PLAN.md
+            docs/IMPLEMENTATION_PLAN.md \
+            2>&1 | tee /tmp/aider-output.log
+
+          if grep -Eiq 'litellm\.[[:alnum:]_]*Error|DeepseekException|APIConnectionError|AuthenticationError|RateLimitError|BadRequestError' /tmp/aider-output.log; then
+            echo "DeepSeek vratil chybu API; beh nebude oznacen jako uspesny." >&2
+            exit 1
+          fi
+
+          if [ -z "$(git status --porcelain -- app components hooks lib tests docs)" ]; then
+            echo "Aider nevytvoril zadne zmeny; beh nebude pokracovat jako uspesny." >&2
+            exit 1
+          fi
 
       - name: Bezpecnostni kontrola zmen
         shell: bash
