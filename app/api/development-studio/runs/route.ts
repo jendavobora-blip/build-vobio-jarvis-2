@@ -66,7 +66,8 @@ async function authorizedUser(request: Request, write: boolean) {
   if (!isDatabaseConfigured()) {
     return Response.json({ error: "Audit běhů vyžaduje DATABASE_URL." }, { status: 501 })
   }
-  const limited = await rateLimitResponse(request, `development-studio:${user.id}`, write ? 5 : 30, 60 * 60_000)
+  const bucket = write ? "write" : "read"
+  const limited = await rateLimitResponse(request, `development-studio:${bucket}:${user.id}`, write ? 5 : 30, 60 * 60_000)
   return limited ?? user
 }
 
@@ -104,8 +105,9 @@ export async function POST(request: Request) {
   }
   const parsed = requestSchema.safeParse(body.value)
   if (!parsed.success) return Response.json({ error: "Neplatné zadání Development Studia." }, { status: 400 })
-  const [owner, repository, extra] = parsed.data.repository.split("/")
-  if (!owner || !repository || extra || !isValidRepositoryPath(owner, repository)) {
+  const repositoryParts = parsed.data.repository.split("/")
+  const [owner, repository] = repositoryParts
+  if (repositoryParts.length !== 2 || !owner || !repository || !isValidRepositoryPath(owner, repository)) {
     return Response.json({ error: "Povoleny jsou pouze veřejné repozitáře ve tvaru vlastník/název." }, { status: 400 })
   }
 

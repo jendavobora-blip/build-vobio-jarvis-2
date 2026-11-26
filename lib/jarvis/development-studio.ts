@@ -82,8 +82,9 @@ export async function createMockDevelopmentStudioRun(input: {
   provider?: DevelopmentAgentProvider
   executor?: IsolatedCodeExecutor
 }): Promise<DevelopmentStudioMockRun> {
-  const [owner, name, extra] = input.repository.split("/")
-  if (!owner || !name || extra) throw new Error("Zadejte platný veřejný repozitář.")
+  const repositoryParts = input.repository.split("/")
+  const [owner, name] = repositoryParts
+  if (repositoryParts.length !== 2 || !owner || !name) throw new Error("Zadejte platný veřejný repozitář.")
   if (!/^[a-f0-9]{64}$/.test(input.taskHash)) throw new Error("Neplatný otisk zadání.")
 
   const repository: Pick<PublicGitHubRepository, "fullName"> = { fullName: input.repository }

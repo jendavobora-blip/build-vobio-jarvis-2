@@ -75,6 +75,12 @@ test("mock Studio rejects invalid repository paths and refuses an active executo
     createMockDevelopmentStudioRun({ ...input, repository: "octocat/private/repo" }),
     /platný veřejný repozitář/,
   )
+  for (const invalidRepository of ["octocat/hello-world/", "octocat//hello-world"]) {
+    await assert.rejects(
+      createMockDevelopmentStudioRun({ ...input, repository: invalidRepository }),
+      /platný veřejný repozitář/,
+    )
+  }
   await assert.rejects(
     createMockDevelopmentStudioRun({
       ...input,
