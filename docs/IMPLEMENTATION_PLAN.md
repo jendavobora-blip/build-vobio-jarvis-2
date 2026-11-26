@@ -18,7 +18,7 @@ Tento soubor zachycuje skutečný stav větve PR #1. **Aplikace není dokončena
 - [~] Mission Control: stávající obrazovka Orchestrace zobrazuje stav a demo; není trvalá historie úloh. Akceptace: reálný průběh a obnovená historie po přihlášení.
 - [~] Agent Hub mapuje původní ID bez jejich přejmenování na Router, Researcher, Architect, Coder, Analyst, Critic a Final Judge. Router plánuje, specialisté běží ve fázích a Final Judge volá modelovou syntézu; pomocný legacy Memory agent zůstává kvůli kompatibilitě. Serverový allowlist nyní povoluje `search_memory` pouze Memory agentovi a orchestrace má tenant/uživatelsky scoped audit. Akceptace: test mapování starých ID, mockované integrační testy pořadí a selhání rolí.
 - [ ] Research Studio: zdroje, dokumenty a analýzy. Akceptace: prokazatelné citace a práce s oprávněnými dokumenty bez neohlášených externích přenosů.
-- [ ] Development Studio: autorizovaný repozitář, izolované změny, testy a PR. Akceptace: auditovatelný průchod ve schváleném rozsahu bez přístupu k produkčním tajemstvím.
+- [~] Development Studio: osm specializací připravuje lokální kontrolní plán a načítá veřejná metadata/recentní commity přes GitHub API v read-only režimu. AI provádění, soukromé repozitáře, izolovaný runner, změny kódu ani PR vytváření nejsou aktivní. Akceptace: připravit runner s omezením oprávnění a explicitním schválením, poté doplnit end-to-end ověření každého agenta.
 - [~] Projects: pouze ukázkové položky, nikoli uživatelské projekty. Akceptace: oddělený katalog skutečných technologií a import pouze oprávněných GitHub repozitářů.
 - [~] Approvals: bezpečné ukládání a schvalování konkrétních plánů včetně auditu; zatím není aktivní externí executor. Akceptace: změněný plán vyžaduje nové potvrzení, kritické akce samostatné potvrzení a jednorázová autorizace.
 - [~] Memory: lokální a volitelná databázová paměť, import/export, hledání v názvu a obsahu a šifrování citlivého obsahu; databáze filtruje stabilní owner ID. Samostatní uživatelé, ověřená obnova a testy izolace tenantů chybí. Akceptace: testy izolace více účtů, obnovy, exportu a mazání.
@@ -42,6 +42,7 @@ Tento soubor zachycuje skutečný stav větve PR #1. **Aplikace není dokončena
 ## Katalog a projekty
 
 - [ ] Ověřit oficiální repozitáře, licence, oprávnění, způsoby integrace a náklady všech 20 požadovaných technologií. Rozlišit katalog, připravený adaptér a aktivní integraci; skutečné projekty importovat odděleně. Akceptace: každá položka má zdroj, datum ověření a přesný stav; integrace nejsou aktivovány bez souhlasu.
+- [~] GitHub veřejné read-only API zobrazí metadata repozitáře a posledních pět commitů bez tokenu; nepřistupuje k soukromým repozitářům a nic nezapisuje. Ověření živého HTTPS spojení z vývojového prostředí a import oprávněných repozitářů stále chybí.
 - Požadovaný seznam k ověření: Mastra, LangGraph.js, CrewAI; Codex, OpenCode, OpenHands, Cline, Vercel Coding Agent Template; Stagehand, Browser Use, Skyvern, Firecrawl, Open Deep Research; bolt.diy, Dyad, Playwright MCP; n8n, Mem0, MCP Servers a Langfuse. Je nutné rozlišit skutečné open-source licence od jiných licencí a neověřené údaje nepovažovat za hotové.
 
 ## Účty, paměť a schvalování

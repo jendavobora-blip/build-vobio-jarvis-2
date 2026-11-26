@@ -3,6 +3,7 @@
 import {
   BarChart3,
   Brain,
+  Code2,
   FolderKanban,
   GitBranch,
   Mic,
@@ -18,6 +19,7 @@ import { cn } from "@/lib/utils"
 export type JarvisView =
   | "command"
   | "agents"
+  | "development"
   | "orchestration"
   | "projects"
   | "automations"
@@ -30,6 +32,7 @@ export type JarvisView =
 const SCREENS: { id: JarvisView; label: string; icon: LucideIcon }[] = [
   { id: "command", label: "Velín", icon: Radar },
   { id: "agents", label: "Agenti", icon: Users },
+  { id: "development", label: "Studio", icon: Code2 },
   { id: "orchestration", label: "Tok", icon: GitBranch },
   { id: "projects", label: "Projekty", icon: FolderKanban },
   { id: "automations", label: "Rutiny", icon: Timer },

@@ -11,6 +11,7 @@ import { MemoryDrawer } from "./memory-drawer"
 import { ResultPanel } from "./result-panel"
 import { SettingsDrawer } from "./settings-drawer"
 import { SpatialVisualization } from "./spatial-visualization"
+import { DevelopmentStudioScreen } from "./development-studio-screen"
 import {
   AnalyticsScreen,
   ApprovalsScreen,
@@ -215,6 +216,8 @@ export function JarvisApp() {
                 <ResultPanel run={run} speaking={voice.speaking} canSpeak={voice.synthesisSupported} onSpeak={voice.speak} onStopSpeaking={voice.stopSpeaking} />
               </section>
             )}
+
+            {view === "development" && <DevelopmentStudioScreen />}
 
             {view === "orchestration" && (
               <section className="space-y-4">

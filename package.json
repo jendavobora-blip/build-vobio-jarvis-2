@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "test:integration": "node --conditions=react-server --import tsx --test tests/orchestrator.integration.ts tests/tool-calling.integration.ts",
+    "test:integration": "node --conditions=react-server --import tsx --test tests/orchestrator.integration.ts tests/tool-calling.integration.ts tests/github-route.integration.ts",
     "test:db": "node --conditions=react-server --import tsx --test tests/postgres.integration.ts",
     "test:e2e": "playwright test"
   },
