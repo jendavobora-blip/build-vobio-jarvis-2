@@ -317,12 +317,13 @@ export async function runOrchestration({ body, emit, signal, limits, audit }: Ru
     // Exactly one tool call may enter this execution round.
     const call = first.toolCalls[0]
     const fn = call.function
-    const auditToolName = fn.name.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 128) || "(empty)"
+    const toolAllowed = isToolAllowed("memory", fn.name)
+    const auditToolName = toolAllowed ? fn.name : "unknown_tool"
     await auditWithUsage({ runId, agentId: "memory", event: "tool_requested", toolName: auditToolName })
-    if (!isToolAllowed("memory", fn.name)) {
+    if (!toolAllowed) {
       toolFailed = true
       toolCallFailed = true
-      const message = `Neznámý nebo nepovolený nástroj: ${fn.name}`
+      const message = "Nepovolený nebo neznámý nástroj byl odmítnut."
       await auditWithUsage({ runId, agentId: "memory", event: "tool_denied", toolName: auditToolName })
       emit({ type: "agent_error", agent: "memory", message, attempts: first.attempts, at: now() })
       emit({
@@ -335,19 +336,9 @@ export async function runOrchestration({ body, emit, signal, limits, audit }: Ru
       })
       toolMessages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: message }) })
     } else {
+      let outcome: ReturnType<typeof executeSearchMemory> | undefined
       try {
-        const outcome = executeSearchMemory(body.memories, fn.arguments)
-        await auditWithUsage({ runId, agentId: "memory", event: "tool_succeeded", toolName: auditToolName })
-        matchCount = outcome.matches
-        emit({
-          type: "agent_status",
-          agent: "memory",
-          status: "thinking",
-          task: "Tool: search_memory",
-          activity: `search_memory: ${outcome.matches} výsledků`,
-          at: now(),
-        })
-        toolMessages.push({ role: "tool", tool_call_id: call.id, content: outcome.content })
+        outcome = executeSearchMemory(body.memories, fn.arguments)
       } catch (error) {
         toolFailed = true
         toolCallFailed = true
@@ -363,6 +354,19 @@ export async function runOrchestration({ body, emit, signal, limits, audit }: Ru
           at: now(),
         })
         toolMessages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: message }) })
+      }
+      if (outcome) {
+        await auditWithUsage({ runId, agentId: "memory", event: "tool_succeeded", toolName: auditToolName })
+        matchCount = outcome.matches
+        emit({
+          type: "agent_status",
+          agent: "memory",
+          status: "thinking",
+          task: "Tool: search_memory",
+          activity: `search_memory: ${outcome.matches} výsledků`,
+          at: now(),
+        })
+        toolMessages.push({ role: "tool", tool_call_id: call.id, content: outcome.content })
       }
     }
 

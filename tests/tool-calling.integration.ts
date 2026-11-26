@@ -190,7 +190,8 @@ test("search_memory tool round succeeds and records invocation and outcome", asy
 
 test("unknown tool name is rejected visibly and not reported as success", async () => {
   process.env.DEEPSEEK_API_KEY = "integration-test-placeholder"
-  installFetch({ firstCall: "tool", finalCall: "json", toolName: "delete_everything" })
+  const rawToolName = `search_memory:${orionMemory[0]!.content}`
+  installFetch({ firstCall: "tool", finalCall: "json", toolName: rawToolName })
 
   const { runOrchestration } = await import("../lib/server/orchestrator")
   const events: RunEvent[] = []
@@ -209,6 +210,10 @@ test("unknown tool name is rejected visibly and not reported as success", async 
   assert.ok(memoryErrors.some((event) => String(event.message).includes("Nepovolený") || String(event.message).includes("Neznámý")))
   assert.deepEqual(audit.map((event) => event.event), ["run_started", "tool_requested", "tool_denied", "run_failed"])
   assert.equal(failureReason(audit), "tool_error")
+  const serializedAudit = JSON.stringify(audit)
+  assert.equal(serializedAudit.includes(rawToolName), false)
+  assert.equal(serializedAudit.includes(orionMemory[0]!.content), false)
+  assert.ok(audit.filter((event) => "toolName" in event).every((event) => event.toolName === "unknown_tool"))
   assert.ok(!events.some((event) => event.type === "final"))
   const statuses = statusEvents(events)
   assert.ok(!statuses.some((status) => status.activity?.startsWith("Tool dokončen")))
@@ -480,6 +485,42 @@ test("audit persistence failure prevents a success-shaped final response", async
   const failedUsage = (failure as Error & { usage?: Usage }).usage
   assert.ok(failedUsage)
   assert.ok(failedUsage.promptTokens > 0)
+  assert.ok(failedUsage.completionTokens > 0)
+  assert.ok(failedUsage.costUsd > 0)
+  assert.ok(!events.some((event) => event.type === "final" || event.type === "done"))
+})
+
+test("tool success audit failure propagates and is never relabeled as tool execution failure", async () => {
+  process.env.DEEPSEEK_API_KEY = "integration-test-placeholder"
+  installFetch({ firstCall: "tool", finalCall: "json" })
+  const { runOrchestration } = await import("../lib/server/orchestrator")
+  const events: RunEvent[] = []
+  const audit: OrchestrationAuditEvent[] = []
+  let failure: unknown
+  try {
+    await runOrchestration({
+      body: makeBody(orionMemory),
+      emit: (event) => events.push(event),
+      signal: new AbortController().signal,
+      limits: { maxTokens: 500_000, maxCostUsd: 5 },
+      audit: async (event) => {
+        audit.push(event)
+        if (event.event === "tool_succeeded") throw new Error("simulated audit database outage")
+      },
+    })
+  } catch (error) {
+    failure = error
+  }
+
+  assert.ok(failure instanceof Error)
+  assert.match(failure.message, /simulated audit database outage/)
+  assert.ok("usage" in failure)
+  const failedUsage = (failure as Error & { usage?: Usage }).usage
+  assert.ok(failedUsage)
+  assert.ok(failedUsage.promptTokens > 0)
+  assert.ok(failedUsage.completionTokens > 0)
+  assert.ok(failedUsage.costUsd > 0)
+  assert.ok(!audit.some((event) => event.event === "tool_failed" || event.event === "run_completed"))
   assert.ok(!events.some((event) => event.type === "final" || event.type === "done"))
 })
 

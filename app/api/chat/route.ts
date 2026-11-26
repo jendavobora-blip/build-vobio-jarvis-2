@@ -129,6 +129,12 @@ export async function POST(request: Request) {
           body: parsed,
           emit: (event) => {
             if (event.type === "run_start") auditRunId = event.runId
+            if (event.type === "usage") {
+              spent = {
+                costUsd: event.total.costUsd,
+                tokens: event.total.promptTokens + event.total.completionTokens,
+              }
+            }
             emit(event)
           },
           signal: abort.signal,
