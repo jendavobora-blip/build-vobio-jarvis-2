@@ -2,6 +2,16 @@
 
 Živý AI backend zůstává standardně vypnutý a v prostředí Vercel Preview je vždy zakázán.
 
+## Oprava chráněného Vercel Preview
+
+Změny konfigurace a redeploy proveďte až po schválení konkrétního plánu vlastníkem a úspěšných kontrolách opravného PR. V nastavení projektu Vercel `vobio-jarvis` vyberte **Preview**, případně pouze zamýšlenou větev; neměňte Production ani `main`. Zachovejte Deployment Protection. GitHub Actions secrets se do Vercelu automaticky nepřenášejí.
+
+1. Připravte oddělený Preview PostgreSQL s povoleným TLS, ověřenou konektivitou z Vercelu a vlastním zálohováním. Nepoužívejte produkční databázi ani testovací DB, jejíž schéma testy mažou. Před použitím existující databáze ověřte zálohu a migrační postup níže.
+2. Ve Vercel **Settings → Environment Variables** pro Preview nastavte `DATABASE_URL` na připojení k této DB, `JARVIS_OWNER_ID` na stabilní UUID vlastníka, `JARVIS_ACCESS_CODE` na kód alespoň 8 znaků a nezávislé `JARVIS_SESSION_SECRET` a `JARVIS_ENCRYPTION_KEY` každý alespoň 32 UTF-8 bajtů. Použijte správce tajemství, nikoli chat, commit či log. Existující identitu ani šifrovací klíč svévolně nerotujte: znepřístupnilo by to data.
+3. Pouze pokud je to schváleno, nastavte v tomtéž Preview prostředí serverový `DEEPSEEK_API_KEY` ze správce tajemství. Jeho přítomnost jen nastaví indikátor; nezapínejte placená volání. `JARVIS_LIVE_ENABLED` ponechte vypnutý: Preview je navíc serverově blokováno i při `true`.
+4. Po úspěšných kontrolách redeployujte schválený opravný commit jako Preview, nikoli Production. Ověřte nasazený SHA a přes chráněný přístup HTTPS `/api/status`: `authConfigured` a `databaseConfigured` mají být `true`, `deepseekConfigured` jen pokud byl klíč nastaven, a `liveEnabled` musí být `false`. Tyto indikátory kontrolují přítomnost a formát konfigurace, nikoli připojení k DB či platnost klíče.
+5. Bez volání AI otestujte přihlášení dvou testovacích účtů, historii a odhlášení/přepnutí ve dvou záložkách. Ověřte také `GET /api/github/repository?owner=...&repo=...` s veřejným repozitářem. V produkčním buildu tento endpoint vyžaduje funkční sdílený PostgreSQL limiter: chybějící či nedostupná DB může vrátit 503 „Sdílená ochrana požadavků není dostupná“, případně „Sdílená ochrana GitHub API není dostupná“. Pokud 503 přetrvá, zkontrolujte bezpečně serverové logy, DB připojení, migrace a odchozí HTTPS na GitHub; 429 znamená limit, nikoli chybějící klíč. Žádné hodnoty tajemství nevypisujte.
+
 ## Stabilní vlastník
 
 Databázové nasazení musí mít samostatně nastavené:
@@ -12,6 +22,9 @@ Databázové nasazení musí mít samostatně nastavené:
 - `JARVIS_ENCRYPTION_KEY`: nezávislé tajemství o délce alespoň 32 bajtů pro AES-GCM citlivých položek.
 
 Chybějící nebo neplatný `JARVIS_OWNER_ID` blokuje přihlášení a databázové operace místo odvození nového vlastníka. Rotace session tajemství odhlásí relace, ale nezmění vlastníka. Rotace šifrovacího klíče vyžaduje samostatnou re-encryption migraci; bez ní se starší záznamy nesmí mazat ani přepsat.
+
+Lokální paměť přihlášeného účtu je v prohlížeči oddělena podle serverem podepsaného account scope. Stav relace se při aktivní aplikaci obnovuje každých 60 sekund i při návratu do aplikace; při nejistém stavu se účetní data skryjí a při potvrzené změně scope se oddělí bez mazání starých záznamů. Rotace session secretu změní i tento scope: staré lokální položky se nesmažou, ale nebudou automaticky přístupné. Před rotací zajistěte jejich bezpečný export a postup obnovy.
+Starý společný klíč `vobio-jarvis.memory.v1` se již automaticky nezobrazuje ani nemaže: mohl obsahovat data více lidí. Případnou migraci musí provést vlastník zařízení až po ověření původu jednotlivých položek. Klient cloudové paměti zasílá `X-Jarvis-Account-Scope` získaný ze `/api/status`; server odmítne požadavek s neodpovídajícím scope.
 
 ## Migrace původní paměti
 

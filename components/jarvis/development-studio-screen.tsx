@@ -10,7 +10,7 @@ import {
 import type { PublicGitHubRepository } from "@/lib/github/public-repository"
 import { DevelopmentStudioHistory } from "./development-studio-history"
 
-export function DevelopmentStudioScreen({ authRevision }: { authRevision: string }) {
+export function DevelopmentStudioScreen() {
   const [repositoryPath, setRepositoryPath] = useState("")
   const [task, setTask] = useState("")
   const [repository, setRepository] = useState<PublicGitHubRepository | null>(null)
@@ -20,11 +20,13 @@ export function DevelopmentStudioScreen({ authRevision }: { authRevision: string
   const [mockBusy, setMockBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const loadAbortRef = useRef<AbortController | null>(null)
+  const mockAbortRef = useRef<AbortController | null>(null)
   const loadRequestRef = useRef(0)
   const mockIdempotencyRef = useRef<string | null>(null)
   useEffect(() => () => {
     loadRequestRef.current += 1
     loadAbortRef.current?.abort()
+    mockAbortRef.current?.abort()
   }, [])
 
   const loadRepository = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -85,20 +87,25 @@ export function DevelopmentStudioScreen({ authRevision }: { authRevision: string
     setMockBusy(true)
     const idempotencyKey = mockIdempotencyRef.current ?? crypto.randomUUID()
     mockIdempotencyRef.current = idempotencyKey
+    const controller = new AbortController()
+    mockAbortRef.current = controller
     try {
       const response = await fetch("/api/development-studio/runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ idempotencyKey, repository: repository.fullName, task }),
+        signal: controller.signal,
       })
       const body = await response.json() as { events?: DevelopmentStudioEvent[]; error?: string }
+      if (controller.signal.aborted) return
       if (!response.ok || !body.events) throw new Error(body.error ?? "Mock průchod nelze spustit.")
       setMockEvents(body.events)
       mockIdempotencyRef.current = null
     } catch (reason) {
+      if (controller.signal.aborted) return
       setError(reason instanceof Error ? reason.message : "Mock průchod nelze spustit.")
     } finally {
-      setMockBusy(false)
+      if (!controller.signal.aborted) setMockBusy(false)
     }
   }
 
@@ -244,7 +251,7 @@ export function DevelopmentStudioScreen({ authRevision }: { authRevision: string
           )}
         </div>
       )}
-      <DevelopmentStudioHistory key={authRevision} />
+      <DevelopmentStudioHistory />
     </section>
   )
 }

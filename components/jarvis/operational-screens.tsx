@@ -1,7 +1,7 @@
 "use client"
 
 import { BarChart3, Cloud, HardDrive, LockKeyhole, Mic, Pause, Play, Settings2, ShieldCheck, Sparkles } from "lucide-react"
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useLocalState } from "@/lib/jarvis/local-store"
 import { filterProjects, PROJECTS, type JarvisProject } from "@/lib/jarvis/projects"
 import { formatUsd } from "@/lib/jarvis/pricing"
@@ -135,29 +135,38 @@ export function ApprovalsScreen() {
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const requests = useRef<AbortController | null>(null)
 
   const refresh = useCallback(async () => {
+    const signal = requests.current?.signal
+    if (!signal || signal.aborted) return
     setLoading(true)
     setError(null)
     try {
-      const response = await fetch("/api/approvals", { cache: "no-store" })
+      const response = await fetch("/api/approvals", { cache: "no-store", signal })
       const body = await response.json()
+      if (signal.aborted) return
       if (!response.ok) throw new Error(body.error ?? "Schválení nelze načíst.")
       setItems(body.items)
       setAudit(body.audit)
     } catch (reason) {
+      if (signal.aborted) return
       setError(reason instanceof Error ? reason.message : "Schválení nelze načíst.")
     } finally {
-      setLoading(false)
+      if (!signal.aborted) setLoading(false)
     }
   }, [])
 
   useEffect(() => {
+    requests.current = new AbortController()
     void refresh()
+    return () => requests.current?.abort()
   }, [refresh])
 
   const submitPlan = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    const signal = requests.current?.signal
+    if (!signal || signal.aborted) return
     setMessage(null)
     setError(null)
     try {
@@ -171,8 +180,10 @@ export function ApprovalsScreen() {
           impacts: impacts.split("\n").map((item) => item.trim()).filter(Boolean),
           critical,
         }),
+        signal,
       })
       const body = await response.json()
+      if (signal.aborted) return
       if (!response.ok) throw new Error(body.error ?? "Plán nelze uložit.")
       setTarget("")
       setAction("")
@@ -182,11 +193,14 @@ export function ApprovalsScreen() {
       setMessage("Neměnný plán byl uložen. Žádná externí akce nebyla provedena.")
       await refresh()
     } catch (reason) {
+      if (signal.aborted) return
       setError(reason instanceof Error ? reason.message : "Plán nelze uložit.")
     }
   }
 
   const decide = async (item: ApprovalItem, decision: "approve" | "confirm_critical" | "deny") => {
+    const signal = requests.current?.signal
+    if (!signal || signal.aborted) return
     setMessage(null)
     setError(null)
     try {
@@ -194,12 +208,15 @@ export function ApprovalsScreen() {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: item.id, planHash: item.plan_hash, decision }),
+        signal,
       })
       const body = await response.json()
+      if (signal.aborted) return
       if (!response.ok) throw new Error(body.error ?? "Rozhodnutí nelze uložit.")
       setMessage("Souhlas byl zaznamenán. JARVIS neprovádí externí akce.")
       await refresh()
     } catch (reason) {
+      if (signal.aborted) return
       setError(reason instanceof Error ? reason.message : "Rozhodnutí nelze uložit.")
     }
   }

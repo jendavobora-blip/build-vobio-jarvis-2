@@ -48,8 +48,9 @@ export function useJarvisSettings() {
   return useLocalState<JarvisSettings>("vobio-jarvis.settings.v1", DEFAULT_SETTINGS)
 }
 
-export function useLifetimeUsage() {
-  return useLocalState<LifetimeUsage>("vobio-jarvis.usage.v1", DEFAULT_USAGE)
+export function useLifetimeUsage(accountScope: string | null) {
+  const scope = accountScope ? encodeURIComponent(accountScope) : "pending"
+  return useLocalState<LifetimeUsage>(`vobio-jarvis.usage.v2.${scope}`, DEFAULT_USAGE)
 }
 
 const fetchJson = async (url: string) => {
@@ -59,7 +60,12 @@ const fetchJson = async (url: string) => {
 }
 
 export function useServerStatus() {
-  return useSWR<StatusResponse>("/api/status", fetchJson, { revalidateOnFocus: true })
+  return useSWR<StatusResponse>("/api/status", fetchJson, {
+    revalidateOnFocus: true,
+    refreshInterval: 60_000,
+    refreshWhenHidden: false,
+    refreshWhenOffline: false,
+  })
 }
 
 /** Live execution requires a server key, configured auth, a valid session and the user toggle. */
