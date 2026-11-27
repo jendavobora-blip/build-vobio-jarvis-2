@@ -56,6 +56,17 @@ export function useCzechVoice(onTranscript: (text: string, isFinal: boolean) => 
     recognitionRef.current?.stop()
   }, [])
 
+  const abortListening = useCallback(() => {
+    const rec = recognitionRef.current
+    if (!rec) return
+    rec.onresult = null
+    rec.onend = null
+    rec.onerror = null
+    rec.abort()
+    recognitionRef.current = null
+    setListening(false)
+  }, [])
+
   const startListening = useCallback(() => {
     const Ctor = getRecognitionCtor()
     if (!Ctor) {
@@ -136,6 +147,7 @@ export function useCzechVoice(onTranscript: (text: string, isFinal: boolean) => 
     clearError: () => setError(null),
     startListening,
     stopListening,
+    abortListening,
     speak,
     stopSpeaking,
   }

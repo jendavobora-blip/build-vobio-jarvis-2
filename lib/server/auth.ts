@@ -19,6 +19,11 @@ export interface AuthenticatedUser {
   role: "owner" | "member"
 }
 
+export function accountScope(user: AuthenticatedUser): string | undefined {
+  const secret = serverConfig.sessionSecret
+  return secret ? createHmac("sha256", secret).update(`status-scope:${user.ownerId}:${user.id}`).digest("base64url") : undefined
+}
+
 function secretMaterial(): string | undefined {
   return serverConfig.sessionSecret
 }

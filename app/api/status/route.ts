@@ -1,5 +1,4 @@
-import { createHmac } from "node:crypto"
-import { authenticatedUser } from "@/lib/server/auth"
+import { accountScope, authenticatedUser } from "@/lib/server/auth"
 import { serverConfig } from "@/lib/server/config"
 import { getDailyUsage, isDatabaseConfigured } from "@/lib/server/db"
 import type { StatusResponse } from "@/lib/jarvis/types"
@@ -15,9 +14,7 @@ export async function GET() {
     liveEnabled: serverConfig.liveEnabled,
     authConfigured: Boolean(serverConfig.accessCode && serverConfig.ownerId && serverConfig.sessionSecret && serverConfig.encryptionSecret),
     authenticated,
-    accountScope: user && serverConfig.sessionSecret
-      ? createHmac("sha256", serverConfig.sessionSecret).update(`status-scope:${user.ownerId}:${user.id}`).digest("base64url")
-      : undefined,
+    accountScope: user ? accountScope(user) : undefined,
     userRole: user?.role,
     databaseConfigured: isDatabaseConfigured(),
     limits: {

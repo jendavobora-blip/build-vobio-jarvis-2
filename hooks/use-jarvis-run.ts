@@ -90,6 +90,7 @@ export function useJarvisRun({ onLiveComplete }: Callbacks = {}) {
 
     if (!response.ok || !response.body) {
       const data = (await response.json().catch(() => null)) as { error?: string } | null
+      if (controller.signal.aborted) return
       dispatch({ type: "fail", message: data?.error ?? `Požadavek selhal (${response.status}).` })
       return
     }
@@ -103,6 +104,7 @@ export function useJarvisRun({ onLiveComplete }: Callbacks = {}) {
     try {
       while (true) {
         const { value, done } = await reader.read()
+        if (controller.signal.aborted) return
         if (done) break
         buffer += decoder.decode(value, { stream: true })
         let idx: number
@@ -129,6 +131,7 @@ export function useJarvisRun({ onLiveComplete }: Callbacks = {}) {
     } finally {
       if (abortRef.current === controller) abortRef.current = null
     }
+    if (controller.signal.aborted) return
     if (!sawDone) dispatch({ type: "fail", message: "Stream skončil předčasně." })
     if (usage || finalAnswer) {
       completeRef.current?.({
