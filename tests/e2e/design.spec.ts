@@ -181,6 +181,7 @@ test("studio clears displayed history immediately on logout", async ({ page }) =
   let authenticated = true
   await page.route("**/api/status", async (route) => route.fulfill({ json: {
     deepseekConfigured: false, liveEnabled: false, authConfigured: true, authenticated,
+    accountScope: authenticated ? "account-a" : undefined,
     userRole: "member", databaseConfigured: false,
     limits: { maxRequestUsd: 0, maxRequestTokens: 0, dailyBudgetUsd: 0, runsPer10Min: 0 }, usageToday: null,
   } }))
@@ -259,10 +260,15 @@ test("studio clears previous account history when switching browser tabs", async
 })
 
 test("studio aborts an unfinished mock run when another tab changes session", async ({ page }) => {
+  let scope = "account-a"
   let release!: () => void
   let started!: () => void
   const blocked = new Promise<void>((resolve) => { release = resolve })
   const seen = new Promise<void>((resolve) => { started = resolve })
+  await page.route("**/api/status", async (route) => route.fulfill({ json: {
+    deepseekConfigured: false, liveEnabled: false, authConfigured: true, authenticated: true, accountScope: scope,
+    databaseConfigured: false, limits: { maxRequestUsd: 0, maxRequestTokens: 0, dailyBudgetUsd: 0, runsPer10Min: 0 }, usageToday: null,
+  } }))
   await page.route("**/api/github/repository**", async (route) => route.fulfill({ json: { repository: {
     fullName: "octocat/pending", description: "Pending repository", url: "https://github.com/octocat/pending",
     defaultBranch: "main", stars: 0, openIssues: 0, commits: [],
@@ -282,6 +288,7 @@ test("studio aborts an unfinished mock run when another tab changes session", as
   await page.getByRole("button", { name: "Ověřit bezpečný mock průchod" }).click()
   await seen
   const failed = page.waitForEvent("requestfailed", (request) => request.url().endsWith("/api/development-studio/runs"))
+  scope = "account-b"
   await page.evaluate(() => {
     const channel = new BroadcastChannel("vobio-jarvis-auth")
     channel.postMessage("session-changed")
@@ -337,11 +344,18 @@ test("account change hides previous cloud and device memories and clears the run
   await expect(page.getByText("Device account A")).toHaveCount(0)
 })
 
-test("session change clears a previous chat prompt and demo result", async ({ page }) => {
+test("session expiry clears a previous chat prompt and demo result", async ({ page }) => {
+  let scope: string | null = "account-a"
+  await page.route("**/api/status", async (route) => route.fulfill({ json: {
+    deepseekConfigured: false, liveEnabled: false, authConfigured: true, authenticated: Boolean(scope),
+    accountScope: scope ?? undefined, databaseConfigured: false,
+    limits: { maxRequestUsd: 0, maxRequestTokens: 0, dailyBudgetUsd: 0, runsPer10Min: 0 }, usageToday: null,
+  } }))
   await page.goto("/")
   await page.getByLabel("Zadání pro JARVISe").fill("Private previous account prompt")
   await page.getByRole("button", { name: "Odeslat zadání" }).click()
   await expect(page.getByText("Výsledek · DEMO")).toBeVisible()
+  scope = null
   await page.evaluate(() => {
     const channel = new BroadcastChannel("vobio-jarvis-auth")
     channel.postMessage("session-changed")
@@ -349,6 +363,157 @@ test("session change clears a previous chat prompt and demo result", async ({ pa
   })
   await expect(page.getByText("Výsledek · DEMO")).toHaveCount(0)
   await expect(page.getByText("Private previous account prompt")).toHaveCount(0)
+  await page.getByRole("button", { name: "Velín", exact: true }).click()
+  await expect(page.getByLabel("Zadání pro JARVISe")).toHaveValue("")
+})
+
+test("local analytics are isolated by account without deleting legacy usage", async ({ page }) => {
+  let scope = "account-a"
+  await page.addInitScript(() => {
+    localStorage.setItem("vobio-jarvis.usage.v1", JSON.stringify({
+      runs: 9, promptTokens: 90, completionTokens: 90, costUsd: 9.99,
+    }))
+    localStorage.setItem("vobio-jarvis.usage.v2.account-a", JSON.stringify({
+      runs: 1, promptTokens: 10, completionTokens: 10, costUsd: 1.25,
+    }))
+    localStorage.setItem("vobio-jarvis.usage.v2.account-b", JSON.stringify({
+      runs: 2, promptTokens: 20, completionTokens: 20, costUsd: 3.5,
+    }))
+  })
+  await page.route("**/api/status", async (route) => route.fulfill({ json: {
+    deepseekConfigured: false, liveEnabled: false, authConfigured: true, authenticated: true, accountScope: scope,
+    databaseConfigured: false, limits: { maxRequestUsd: 0, maxRequestTokens: 0, dailyBudgetUsd: 0, runsPer10Min: 0 }, usageToday: null,
+  } }))
+  await page.goto("/")
+  await page.getByRole("button", { name: "Přehled", exact: true }).click()
+  await expect(page.getByText("$1.250")).toBeVisible()
+
+  scope = "account-b"
+  await page.evaluate(() => {
+    const channel = new BroadcastChannel("vobio-jarvis-auth")
+    channel.postMessage("session-changed")
+    channel.close()
+  })
+  await expect(page.getByText("$3.500")).toBeVisible()
+  await expect(page.getByText("$1.250")).toHaveCount(0)
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem("vobio-jarvis.usage.v1") ?? "null").costUsd)).toBe(9.99)
+})
+
+test("ordinary focus loss hides private forms without discarding drafts", async ({ page }) => {
+  await page.route("**/api/status", async (route) => route.fulfill({ json: {
+    deepseekConfigured: false, liveEnabled: false, authConfigured: true, authenticated: true, accountScope: "account-a",
+    databaseConfigured: true, limits: { maxRequestUsd: 0, maxRequestTokens: 0, dailyBudgetUsd: 0, runsPer10Min: 0 }, usageToday: null,
+  } }))
+  await page.route("**/api/memory", async (route) => route.fulfill({ json: { items: [] } }))
+  await page.goto("/")
+  await page.getByRole("button", { name: "Paměť", exact: true }).click()
+  await page.getByRole("button", { name: "Spravovat paměť" }).click()
+  await page.getByRole("button", { name: "Nová položka" }).click()
+  await page.getByLabel("Název", { exact: true }).fill("Unsaved account draft")
+  await page.getByLabel("Obsah", { exact: true }).fill("Keep this while switching apps")
+
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")))
+  await expect(page.getByRole("status")).toContainText("Údaje účtu zůstávají skryté")
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")))
+  await expect(page.getByRole("status")).toHaveCount(0)
+  await expect(page.getByLabel("Název", { exact: true })).toHaveValue("Unsaved account draft")
+  await expect(page.getByRole("textbox", { name: "Obsah", exact: true })).toHaveValue("Keep this while switching apps")
+})
+
+test("failed automatic status revalidation hides cached owner analytics", async ({ page }) => {
+  let unavailable = false
+  let statusRequests = 0
+  await page.route("**/api/status", async (route) => {
+    statusRequests += 1
+    if (unavailable) return route.fulfill({ status: 503, json: { error: "Unavailable" } })
+    await route.fulfill({ json: {
+      deepseekConfigured: false, liveEnabled: false, authConfigured: true, authenticated: true, accountScope: "account-a",
+      userRole: "owner", databaseConfigured: true,
+      limits: { maxRequestUsd: 0, maxRequestTokens: 0, dailyBudgetUsd: 0, runsPer10Min: 0 },
+      usageToday: { costUsd: 0.73, tokens: 4, requests: 1, shared: false },
+    } })
+  })
+  await page.goto("/")
+  await page.getByRole("button", { name: "Přehled", exact: true }).click()
+  await expect(page.getByText("$0.730")).toBeVisible()
+
+  unavailable = true
+  await page.waitForTimeout(5_100)
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")))
+  await expect.poll(() => statusRequests).toBeGreaterThan(1)
+  await expect(page.getByRole("alert").filter({ hasText: "Údaje účtu zůstávají skryté" })).toBeVisible()
+  await expect(page.getByText("$0.730")).toBeHidden()
+  expect(statusRequests).toBeGreaterThan(1)
+
+  unavailable = false
+  await page.getByRole("button", { name: "Zkusit znovu" }).click()
+  await expect(page.getByText("$0.730")).toBeVisible()
+})
+
+test("account scope changes abort voice input and speaking and ignore late transcripts", async ({ page }) => {
+  let scope = "account-a"
+  await page.addInitScript(() => {
+    class MockRecognition {
+      lang = ""
+      interimResults = false
+      continuous = false
+      onresult: ((event: { resultIndex: number; results: ArrayLike<{ isFinal: boolean; 0: { transcript: string } }> }) => void) | null = null
+      onerror: ((event: { error: string }) => void) | null = null
+      onend: (() => void) | null = null
+      start() { Object.defineProperty(window, "__jarvisRecognition", { value: this, configurable: true }) }
+      stop() { this.onend?.() }
+      abort() { Object.defineProperty(window, "__jarvisRecognitionAborted", { value: true, configurable: true }) }
+    }
+    Object.defineProperty(window, "SpeechRecognition", { value: MockRecognition, configurable: true })
+    Object.defineProperty(window, "SpeechSynthesisUtterance", {
+      value: class {
+        lang = ""
+        voice?: SpeechSynthesisVoice
+        onend: (() => void) | null = null
+        onerror: (() => void) | null = null
+        constructor(public text: string) {}
+      },
+      configurable: true,
+    })
+    Object.defineProperty(window, "speechSynthesis", {
+      value: {
+        cancels: 0,
+        cancel() { this.cancels += 1 },
+        getVoices() { return [] },
+        speak(utterance: unknown) { Object.defineProperty(window, "__jarvisUtterance", { value: utterance, configurable: true }) },
+      },
+      configurable: true,
+    })
+  })
+  await page.route("**/api/status", async (route) => route.fulfill({ json: {
+    deepseekConfigured: false, liveEnabled: false, authConfigured: true, authenticated: true, accountScope: scope,
+    databaseConfigured: false, limits: { maxRequestUsd: 0, maxRequestTokens: 0, dailyBudgetUsd: 0, runsPer10Min: 0 }, usageToday: null,
+  } }))
+  await page.goto("/")
+  await page.getByRole("button", { name: "Diktovat hlasem" }).click()
+  await page.getByRole("button", { name: "Hlas", exact: true }).click()
+  await page.getByRole("button", { name: "Přehrát", exact: true }).click()
+  await page.evaluate(() => {
+    const w = window as unknown as { __jarvisRecognition?: { onresult: unknown }; __jarvisLateResult?: unknown }
+    Object.defineProperty(window, "__jarvisLateResult", { value: w.__jarvisRecognition?.onresult, configurable: true })
+  })
+
+  scope = "account-b"
+  await page.evaluate(() => {
+    const channel = new BroadcastChannel("vobio-jarvis-auth")
+    channel.postMessage("session-changed")
+    channel.close()
+  })
+  await expect(page.getByRole("button", { name: "Začít diktovat" })).toBeVisible()
+  const voiceWasStopped = await page.evaluate(() => {
+    const w = window as unknown as { __jarvisRecognitionAborted?: boolean; speechSynthesis: { cancels: number } }
+    return Boolean(w.__jarvisRecognitionAborted) && w.speechSynthesis.cancels >= 2
+  })
+  expect(voiceWasStopped).toBe(true)
+  await page.evaluate(() => {
+    const w = window as unknown as { __jarvisLateResult?: (event: unknown) => void }
+    w.__jarvisLateResult?.({ resultIndex: 0, results: [{ isFinal: true, 0: { transcript: "old account transcript" } }] })
+  })
   await page.getByRole("button", { name: "Velín", exact: true }).click()
   await expect(page.getByLabel("Zadání pro JARVISe")).toHaveValue("")
 })
@@ -377,8 +542,8 @@ test("failed session refresh keeps account data hidden until retry succeeds", as
     channel.postMessage("session-changed")
     channel.close()
   })
-  await expect(page.locator("p[role=alert]")).toContainText("Stav přihlášení nelze ověřit")
-  await expect(page.getByText("Cloud account-a")).toHaveCount(0)
+  await expect(page.getByRole("alert").filter({ hasText: "Stav přihlášení nelze ověřit" })).toBeVisible()
+  await expect(page.getByText("Cloud account-a")).toBeHidden()
   unavailable = false
   await page.getByRole("button", { name: "Zkusit znovu" }).click()
   await expect(page.getByText("Cloud account-b")).toBeVisible()

@@ -48,8 +48,9 @@ export function useJarvisSettings() {
   return useLocalState<JarvisSettings>("vobio-jarvis.settings.v1", DEFAULT_SETTINGS)
 }
 
-export function useLifetimeUsage() {
-  return useLocalState<LifetimeUsage>("vobio-jarvis.usage.v1", DEFAULT_USAGE)
+export function useLifetimeUsage(accountScope: string | null) {
+  const scope = accountScope ? encodeURIComponent(accountScope) : "pending"
+  return useLocalState<LifetimeUsage>(`vobio-jarvis.usage.v2.${scope}`, DEFAULT_USAGE)
 }
 
 const fetchJson = async (url: string) => {

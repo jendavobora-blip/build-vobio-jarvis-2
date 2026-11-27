@@ -49,6 +49,8 @@ export function useCzechVoice(onTranscript: (text: string, isFinal: boolean) => 
   const [speaking, setSpeaking] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const recognitionRef = useRef<RecognitionLike | null>(null)
+  const recognitionGenerationRef = useRef(0)
+  const speechGenerationRef = useRef(0)
   const transcriptRef = useRef(onTranscript)
   transcriptRef.current = onTranscript
 
@@ -57,13 +59,15 @@ export function useCzechVoice(onTranscript: (text: string, isFinal: boolean) => 
   }, [])
 
   const abortListening = useCallback(() => {
+    recognitionGenerationRef.current += 1
     const rec = recognitionRef.current
-    if (!rec) return
-    rec.onresult = null
-    rec.onend = null
-    rec.onerror = null
-    rec.abort()
     recognitionRef.current = null
+    if (rec) {
+      rec.onresult = null
+      rec.onend = null
+      rec.onerror = null
+      rec.abort()
+    }
     setListening(false)
   }, [])
 
@@ -75,13 +79,17 @@ export function useCzechVoice(onTranscript: (text: string, isFinal: boolean) => 
     }
     setError(null)
     window.speechSynthesis?.cancel()
+    speechGenerationRef.current += 1
     setSpeaking(false)
     const rec = new Ctor()
+    const generation = ++recognitionGenerationRef.current
     rec.lang = "cs-CZ"
     rec.interimResults = true
     rec.continuous = false
     let finalText = ""
+    recognitionRef.current = rec
     rec.onresult = (e) => {
+      if (generation !== recognitionGenerationRef.current || recognitionRef.current !== rec) return
       let interim = ""
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const r = e.results[i]
@@ -91,20 +99,23 @@ export function useCzechVoice(onTranscript: (text: string, isFinal: boolean) => 
       transcriptRef.current((finalText + interim).trim(), false)
     }
     rec.onerror = (e) => {
+      if (generation !== recognitionGenerationRef.current || recognitionRef.current !== rec) return
       const msg = ERRORS[e.error] ?? "Rozpoznávání řeči selhalo."
       if (msg) setError(msg)
     }
     rec.onend = () => {
+      if (generation !== recognitionGenerationRef.current || recognitionRef.current !== rec) return
       setListening(false)
       recognitionRef.current = null
       if (finalText.trim()) transcriptRef.current(finalText.trim(), true)
     }
     try {
       rec.start()
-      recognitionRef.current = rec
       setListening(true)
       return true
     } catch {
+      if (recognitionRef.current === rec) recognitionRef.current = null
+      recognitionGenerationRef.current += 1
       setError("Mikrofon se nepodařilo spustit.")
       return false
     }
@@ -115,24 +126,39 @@ export function useCzechVoice(onTranscript: (text: string, isFinal: boolean) => 
     const clean = text.replace(/[#*`>_\-]/g, " ").replace(/\s+/g, " ").trim().slice(0, 3000)
     if (!clean) return
     window.speechSynthesis.cancel()
+    const generation = ++speechGenerationRef.current
     const utter = new SpeechSynthesisUtterance(clean)
     utter.lang = "cs-CZ"
     const voice = window.speechSynthesis.getVoices().find((v) => v.lang.toLowerCase().startsWith("cs"))
     if (voice) utter.voice = voice
-    utter.onend = () => setSpeaking(false)
-    utter.onerror = () => setSpeaking(false)
+    utter.onend = () => {
+      if (generation === speechGenerationRef.current) setSpeaking(false)
+    }
+    utter.onerror = () => {
+      if (generation === speechGenerationRef.current) setSpeaking(false)
+    }
     setSpeaking(true)
     window.speechSynthesis.speak(utter)
   }, [])
 
   const stopSpeaking = useCallback(() => {
+    speechGenerationRef.current += 1
     window.speechSynthesis?.cancel()
     setSpeaking(false)
   }, [])
 
   useEffect(
     () => () => {
-      recognitionRef.current?.abort()
+      recognitionGenerationRef.current += 1
+      const rec = recognitionRef.current
+      recognitionRef.current = null
+      if (rec) {
+        rec.onresult = null
+        rec.onend = null
+        rec.onerror = null
+        rec.abort()
+      }
+      speechGenerationRef.current += 1
       if (typeof window !== "undefined") window.speechSynthesis?.cancel()
     },
     [],

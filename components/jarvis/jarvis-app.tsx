@@ -34,7 +34,6 @@ import { cn } from "@/lib/utils"
 export function JarvisApp() {
   const reduce = useReducedMotion()
   const [settings, setSettings] = useJarvisSettings()
-  const [lifetime, setLifetime] = useLifetimeUsage()
   const status = useServerStatus()
 
   const [view, setView] = useState<JarvisView>("command")
@@ -49,9 +48,22 @@ export function JarvisApp() {
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const authRequestRef = useRef(0)
   const authAbortRef = useRef<AbortController | null>(null)
-  const accountScope = authPending || !status.data ? null : status.data.authenticated ? status.data.accountScope ?? null : "anonymous"
-  const live = Boolean(accountScope && canRunLive(status.data, settings))
-  const cloudAvailable = Boolean(accountScope && accountScope !== "anonymous" && status.data?.databaseConfigured)
+  const previousScopeRef = useRef<string | null>(null)
+  const resolvedScope = status.data
+    ? status.data.authenticated
+      ? status.data.accountScope ?? null
+      : "anonymous"
+    : null
+  const scopeChanged = Boolean(
+    resolvedScope && previousScopeRef.current && previousScopeRef.current !== resolvedScope,
+  )
+  const sessionReady = Boolean(!authPending && !status.error && resolvedScope && !scopeChanged)
+  const accountScope = sessionReady ? resolvedScope : previousScopeRef.current
+  const [lifetime, setLifetime] = useLifetimeUsage(sessionReady ? accountScope : null)
+  const live = Boolean(sessionReady && accountScope && canRunLive(status.data, settings))
+  const cloudAvailable = Boolean(
+    sessionReady && accountScope && accountScope !== "anonymous" && status.data?.databaseConfigured,
+  )
   const memory = useMemories(cloudAvailable, accountScope, authRevision)
 
   const voice = useCzechVoice((text) => setInput(text))
@@ -71,6 +83,7 @@ export function JarvisApp() {
 
   const { state: run, startLive, startDemo, cancel, reset } = useJarvisRun({
     onLiveComplete: ({ prompt, answer, usage }) => {
+      if (!sessionReady || !accountScope) return
       setLifetime((l) => ({
         runs: l.runs + 1,
         promptTokens: l.promptTokens + usage.promptTokens,
@@ -83,20 +96,18 @@ export function JarvisApp() {
     },
   })
 
-  const invalidateSession = useCallback(() => {
+  const beginSessionCheck = useCallback(() => {
     ++authRequestRef.current
     authAbortRef.current?.abort()
     setAuthPending(true)
     setAuthError(false)
-    setAuthRevision((revision) => revision + 1)
-    setInput("")
-    reset()
+    cancel()
     voice.abortListening()
     voice.stopSpeaking()
-  }, [reset, voice.abortListening, voice.stopSpeaking])
+  }, [cancel, voice.abortListening, voice.stopSpeaking])
 
   const refreshSession = useCallback(() => {
-    invalidateSession()
+    beginSessionCheck()
     const request = authRequestRef.current
     const controller = new AbortController()
     authAbortRef.current = controller
@@ -113,11 +124,19 @@ export function JarvisApp() {
         if (!controller.signal.aborted && request === authRequestRef.current) setAuthError(true)
       }
     })()
-  }, [invalidateSession, status.mutate])
+  }, [beginSessionCheck, status.mutate])
 
   useEffect(() => {
     return () => authAbortRef.current?.abort()
   }, [])
+
+  useEffect(() => {
+    if (status.error && !authPending) refreshSession()
+  }, [authPending, refreshSession, status.error])
+
+  useEffect(() => {
+    if (status.data?.authenticated && !status.data.accountScope && !authPending) refreshSession()
+  }, [authPending, refreshSession, status.data])
 
   useEffect(() => {
     const channel = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel("vobio-jarvis-auth")
@@ -128,7 +147,7 @@ export function JarvisApp() {
     const suspend = () => {
       if (!suspended) {
         suspended = true
-        invalidateSession()
+        beginSessionCheck()
       }
     }
     const resume = () => {
@@ -152,17 +171,19 @@ export function JarvisApp() {
       window.removeEventListener("focus", resume)
       document.removeEventListener("visibilitychange", onVisibility)
     }
-  }, [invalidateSession, refreshSession])
+  }, [beginSessionCheck, refreshSession])
 
-  const previousScopeRef = useRef<string | null>(null)
   useEffect(() => {
-    if (!accountScope) return
-    if (previousScopeRef.current && previousScopeRef.current !== accountScope) {
+    if (!resolvedScope) return
+    if (previousScopeRef.current && previousScopeRef.current !== resolvedScope) {
       setInput("")
       reset()
+      setAuthRevision((revision) => revision + 1)
+      voice.abortListening()
+      voice.stopSpeaking()
     }
-    previousScopeRef.current = accountScope
-  }, [accountScope, reset])
+    previousScopeRef.current = resolvedScope
+  }, [resolvedScope, reset, voice.abortListening, voice.stopSpeaking])
 
   const running = run.phase === "running"
 
@@ -217,7 +238,12 @@ export function JarvisApp() {
       : "Bez volání API"
 
   return (
-    <div className="relative min-h-dvh overflow-x-hidden">
+    <>
+    <div
+      className={cn("relative min-h-dvh overflow-x-hidden", !sessionReady && "invisible")}
+      aria-hidden={!sessionReady}
+      inert={!sessionReady}
+    >
       <div aria-hidden="true" className="hud-grid pointer-events-none fixed inset-0 opacity-60 [mask-image:radial-gradient(ellipse_at_top,black_20%,transparent_75%)]" />
       <div aria-hidden="true" className="pointer-events-none fixed -top-40 left-1/2 h-96 w-[36rem] -translate-x-1/2 rounded-full bg-primary/10 blur-3xl" />
 
@@ -245,11 +271,7 @@ export function JarvisApp() {
       </header>
 
       <main className="relative z-10 mx-auto max-w-3xl px-4 pb-36">
-        {authError && <p role="alert" className="mb-2 rounded-xl border border-destructive/40 p-3 text-sm text-destructive">
-          Stav přihlášení nelze ověřit. Údaje účtu zůstávají skryté.{" "}
-          <button type="button" onClick={refreshSession} className="underline">Zkusit znovu</button>
-        </p>}
-        {!live && status.data && (
+        {!live && sessionReady && status.data && (
           <DemoNotice
             reason={
               !status.data.liveEnabled
@@ -308,7 +330,7 @@ export function JarvisApp() {
               </section>
             )}
 
-            {view === "development" && !authPending && <DevelopmentStudioScreen key={`${authRevision}:${status.data?.accountScope ?? "anonymous"}`} />}
+            {view === "development" && <DevelopmentStudioScreen key={`${authRevision}:${status.data?.accountScope ?? "anonymous"}`} />}
 
             {view === "orchestration" && (
               <section className="space-y-4">
@@ -325,8 +347,8 @@ export function JarvisApp() {
             {view === "voice" && <VoiceScreen listening={voice.listening} speaking={voice.speaking} supported={voice.recognitionSupported} canSpeak={voice.synthesisSupported} error={voice.error ?? hint} onMic={handleMic} onSpeak={() => voice.speak("Dobrý den, JARVIS je připraven. Hlasové ovládání se spouští pouze po vašem klepnutí.")} onStop={voice.stopSpeaking} />}
             {view === "approvals" && accountScope && <ApprovalsScreen key={`${authRevision}:${accountScope}`} />}
             {view === "memory" && <MemoryScreen items={memory.items} cloudAvailable={cloudAvailable} onOpen={() => setMemoryOpen(true)} />}
-            {view === "analytics" && <AnalyticsScreen lifetime={lifetime} status={status.data} run={run} />}
-            {view === "settings" && <SettingsScreen settings={settings} liveEnabled={Boolean(status.data?.liveEnabled)} onOpen={() => setSettingsOpen(true)} />}
+            {view === "analytics" && <AnalyticsScreen lifetime={lifetime} status={sessionReady ? status.data : undefined} run={run} />}
+            {view === "settings" && <SettingsScreen settings={settings} liveEnabled={Boolean(sessionReady && status.data?.liveEnabled)} onOpen={() => setSettingsOpen(true)} />}
           </motion.div>
         </AnimatePresence>
       </main>
@@ -352,7 +374,7 @@ export function JarvisApp() {
         onClose={() => setSettingsOpen(false)}
         settings={settings}
         setSettings={setSettings}
-        status={authPending ? undefined : status.data}
+        status={sessionReady ? status.data : undefined}
         statusError={Boolean(status.error)}
         onStatusChange={() => {
           refreshSession()
@@ -377,6 +399,22 @@ export function JarvisApp() {
         voiceSupport={{ recognition: voice.recognitionSupported, synthesis: voice.synthesisSupported }}
       />
     </div>
+    {!sessionReady && (
+      <div
+        role={authError ? "alert" : "status"}
+        className="fixed inset-0 z-[100] flex items-center justify-center bg-background/95 p-4 text-center"
+      >
+        <div className="max-w-sm space-y-3">
+          <p className="text-sm text-muted-foreground">
+            {authError
+              ? "Stav přihlášení nelze ověřit. Údaje účtu zůstávají skryté."
+              : "Ověřuji relaci. Údaje účtu zůstávají skryté."}
+          </p>
+          {authError && <button type="button" onClick={refreshSession} className="min-h-11 rounded-full border px-4 underline">Zkusit znovu</button>}
+        </div>
+      </div>
+    )}
+    </>
   )
 }
 
