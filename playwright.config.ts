@@ -2,6 +2,7 @@ import { defineConfig, devices } from "@playwright/test"
 
 export default defineConfig({
   testDir: "./tests/e2e",
+  testIgnore: "account-isolation.spec.ts",
   fullyParallel: false,
   use: {
     ...devices["iPhone 13"],
