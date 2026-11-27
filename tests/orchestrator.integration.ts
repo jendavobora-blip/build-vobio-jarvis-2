@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { afterEach, test } from "node:test"
 import { SPECIALISTS } from "../lib/jarvis/agents"
 import type { ChatRequestBody, RunEvent } from "../lib/jarvis/types"
+import type { OrchestrationAuditEvent } from "../lib/server/db"
 import {
   createSessionToken,
   decryptText,
@@ -95,6 +96,13 @@ test("Router delegates to legacy-compatible specialists and Final Judge returns 
 test("orchestration phases pass prior specialist outputs to Final Judge", async () => {
   process.env.DEEPSEEK_API_KEY = "integration-test-placeholder"
   const calls: { role: string; user: string }[] = []
+  let releaseResearcher!: () => void
+  const researcherGate = new Promise<void>((resolve) => { releaseResearcher = resolve })
+  let markResearcherStarted!: () => void
+  const researcherStarted = new Promise<void>((resolve) => { markResearcherStarted = resolve })
+  let markOtherSpecialistsDone!: () => void
+  const otherSpecialistsDone = new Promise<void>((resolve) => { markOtherSpecialistsDone = resolve })
+  const pendingFirstPhase = new Set(["memory", "planner", "analyst"])
   globalThis.fetch = async (_input, init) => {
     const request = JSON.parse(String(init?.body)) as {
       messages: { role: string; content: string }[]
@@ -103,6 +111,10 @@ test("orchestration phases pass prior specialist outputs to Final Judge", async 
     const user = request.messages.find((message) => message.role === "user")?.content ?? ""
     const role = /Role: (ROUTER|RESEARCHER|STRÁŽCE PAMĚTI|ARCHITECT|ANALYST|CODER|CRITIC|FINAL JUDGE)/.exec(system)?.[1] ?? "unknown"
     calls.push({ role, user })
+    if (role === "RESEARCHER") {
+      markResearcherStarted()
+      await researcherGate
+    }
     const data = role === "ROUTER"
       ? {
           rationale: "Použij tým a respektuj fáze.",
@@ -135,13 +147,36 @@ test("orchestration phases pass prior specialist outputs to Final Judge", async 
     budget: { maxTokens: 500_000, maxCostUsd: 5 },
     memories: [],
   }
-  await runOrchestration({
+  const run = runOrchestration({
     body,
-    emit: (event) => events.push(event),
+    emit: (event) => {
+      events.push(event)
+      if (event.type === "agent_status" && event.status === "done") {
+        pendingFirstPhase.delete(event.agent)
+        if (pendingFirstPhase.size === 0) markOtherSpecialistsDone()
+      }
+    },
     signal: new AbortController().signal,
     limits: { maxTokens: 500_000, maxCostUsd: 5 },
     audit: async () => {},
   })
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      Promise.all([researcherStarted, otherSpecialistsDone]),
+      run.then(() => { throw new Error("Orchestration finished before the researcher was released.") }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("First-phase specialists did not finish in time.")), 10_000)
+      }),
+    ])
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert.ok(!calls.some((call) => call.role === "CODER"))
+    assert.ok(!events.some((event) => event.type === "agent_status" && event.agent === "researcher" && event.status === "done"))
+  } finally {
+    if (timer) clearTimeout(timer)
+    releaseResearcher()
+    await run
+  }
 
   const plan = events.find((event) => event.type === "plan")
   assert.deepEqual(plan?.selected.map(({ agent }) => agent), SPECIALISTS)
@@ -155,10 +190,70 @@ test("orchestration phases pass prior specialist outputs to Final Judge", async 
   assert.ok(firstPhaseIndexes.every((index) => index > 0 && index < creatorIndex))
   assert.ok(creatorIndex < criticIndex && criticIndex < judgeIndex)
   for (const role of firstPhase) assert.ok(calls[creatorIndex]?.user.includes(`výstup-${role}`))
-  assert.ok(calls[criticIndex]?.user.includes("výstup-CODER"))
+  for (const role of [...firstPhase, "CODER"]) {
+    assert.ok(calls[criticIndex]?.user.includes(`výstup-${role}`))
+  }
   for (const role of [...firstPhase, "CODER", "CRITIC"]) {
     assert.ok(calls[judgeIndex]?.user.includes(`výstup-${role}`))
   }
+})
+
+test("nonfatal researcher failure preserves other work and records a single failed run", async () => {
+  process.env.DEEPSEEK_API_KEY = "integration-test-placeholder"
+  const calls: string[] = []
+  globalThis.fetch = async (_input, init) => {
+    const request = JSON.parse(String(init?.body)) as { messages: { role: string; content: string }[] }
+    const system = request.messages[0]?.content ?? ""
+    const role = /Role: (ROUTER|RESEARCHER|STRÁŽCE PAMĚTI|ARCHITECT|ANALYST|CODER|CRITIC|FINAL JUDGE)/.exec(system)?.[1] ?? "unknown"
+    calls.push(role)
+    if (role === "RESEARCHER") return new Response("invalid request", { status: 400 })
+    const data = role === "ROUTER"
+      ? { rationale: "Použij tým.", agents: SPECIALISTS.map((id) => ({ id, task: `Úkol pro ${id}.` })) }
+      : role === "FINAL JUDGE"
+        ? { answer: "Tato odpověď nesmí být zveřejněna.", nextSteps: [], needsApproval: [] }
+        : { summary: `výstup-${role}`, points: [], data: [], confidence: "vysoká", warnings: [] }
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify(data) } }],
+      usage: { prompt_tokens: 100, completion_tokens: 80, prompt_cache_hit_tokens: 0 },
+    }), { headers: { "Content-Type": "application/json" } })
+  }
+
+  const { runOrchestration } = await import("../lib/server/orchestrator")
+  const events: RunEvent[] = []
+  const audit: OrchestrationAuditEvent[] = []
+  await runOrchestration({
+    body: {
+      message: "Ověř selhání specialisty.",
+      mode: "universal",
+      depth: "full",
+      model: "deepseek-flash",
+      reasoning: false,
+      enabledAgents: [...SPECIALISTS],
+      budget: { maxTokens: 500_000, maxCostUsd: 5 },
+      memories: [],
+    },
+    emit: (event) => events.push(event),
+    signal: new AbortController().signal,
+    limits: { maxTokens: 500_000, maxCostUsd: 5 },
+    audit: async (event) => { audit.push(event) },
+  })
+
+  assert.equal(calls.filter((role) => role === "RESEARCHER").length, 1)
+  assert.ok(events.some((event) => event.type === "agent_error" && event.agent === "researcher"))
+  assert.ok(events.some((event) => event.type === "agent_status" && event.agent === "researcher" && event.status === "error"))
+  for (const agent of SPECIALISTS.filter((id) => id !== "researcher")) {
+    assert.ok(events.some((event) => event.type === "agent_output" && event.agent === agent), `${agent} output missing`)
+    assert.ok(events.some((event) => event.type === "agent_status" && event.agent === agent && event.status === "done"), `${agent} did not finish`)
+  }
+  assert.ok(calls.includes("FINAL JUDGE"))
+  const terminal = audit.filter((event) => event.event === "run_failed" || event.event === "run_completed")
+  assert.equal(terminal.length, 1)
+  assert.equal(terminal[0]?.event, "run_failed")
+  assert.equal(terminal[0]?.event === "run_failed" && terminal[0].failureReason, "model_error")
+  assert.equal(audit.at(-1)?.event, "run_failed")
+  assert.ok(!events.some((event) => event.type === "final"))
+  assert.ok(events.some((event) => event.type === "error"))
+  assert.equal(events.at(-1)?.type, "done")
 })
 
 test("invited account passwords are salted and verified without storing plaintext", async () => {
