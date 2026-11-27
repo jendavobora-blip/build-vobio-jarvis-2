@@ -28,7 +28,7 @@ import {
   setAccountActive,
   upsertMemory,
 } from "../lib/server/db"
-import { encryptText } from "../lib/server/auth"
+import { decryptText, encryptText } from "../lib/server/auth"
 import { approvalHash } from "../lib/server/approvals"
 import { preserveUsageForSettlement, settleBudgetUsage } from "../lib/server/usage-settlement"
 import { createMockDevelopmentStudioRun } from "../lib/jarvis/development-studio"
@@ -43,6 +43,119 @@ assert.equal(parsedUrl.pathname, "/jarvis_test", "DB testy vyžadují databázi 
 const pool = new Pool({ connectionString })
 const owner = "3a3b4c5d-6e7f-4a8b-9c0d-1e2f3a4b5c6d"
 const member = "4b4c5d6e-7f80-4b9c-8d1e-2f3a4b5c6d7e"
+const rotationOwner = "6d7e8f90-a1b2-4c3d-8e9f-0a1b2c3d4e5f"
+const rotationTable = "jarvis_test_reencryption_records"
+const oldTestKey = "old-test-key-for-reencryption-1234567890"
+const newTestKey = "new-test-key-for-reencryption-1234567890"
+const decryptionFailure = "[nelze dešifrovat – ověřte JARVIS_ENCRYPTION_KEY a případný JARVIS_LEGACY_ENCRYPTION_KEY]"
+let rotationTableCreated = false
+
+interface RotationRecord {
+  id: string
+  owner_id: string
+  category: string
+  title: string
+  content: string
+  sensitive: boolean
+  created_at: Date
+  updated_at: Date
+}
+
+function withEncryptionKeys<T>(current: string, legacy: string | undefined, callback: () => T): T {
+  const previousCurrent = process.env.JARVIS_ENCRYPTION_KEY
+  const previousLegacy = process.env.JARVIS_LEGACY_ENCRYPTION_KEY
+  process.env.JARVIS_ENCRYPTION_KEY = current
+  if (legacy === undefined) delete process.env.JARVIS_LEGACY_ENCRYPTION_KEY
+  else process.env.JARVIS_LEGACY_ENCRYPTION_KEY = legacy
+  try {
+    return callback()
+  } finally {
+    if (previousCurrent === undefined) delete process.env.JARVIS_ENCRYPTION_KEY
+    else process.env.JARVIS_ENCRYPTION_KEY = previousCurrent
+    if (previousLegacy === undefined) delete process.env.JARVIS_LEGACY_ENCRYPTION_KEY
+    else process.env.JARVIS_LEGACY_ENCRYPTION_KEY = previousLegacy
+  }
+}
+
+function decryptWithKey(ciphertext: string, key: string): string {
+  return withEncryptionKeys(key, undefined, () => decryptText(ciphertext))
+}
+
+async function prepareRotationRecords(records: { id: string; plaintext: string; key: string }[]) {
+  if (!rotationTableCreated) {
+    await pool.query(`CREATE TABLE ${rotationTable} (
+      id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, category TEXT NOT NULL, title TEXT NOT NULL,
+      content TEXT NOT NULL, sensitive BOOLEAN NOT NULL, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL
+    )`)
+    rotationTableCreated = true
+  }
+  await pool.query(`TRUNCATE TABLE ${rotationTable}`)
+  for (const [index, record] of records.entries()) {
+    const ciphertext = withEncryptionKeys(record.key, undefined, () => encryptText(record.plaintext))
+    await pool.query(
+      `INSERT INTO ${rotationTable} (id, owner_id, category, title, content, sensitive, created_at, updated_at)
+       VALUES ($1, $2, 'history', $3, $4, TRUE, $5, $6)`,
+      [record.id, rotationOwner, `Synthetic ${index}`, ciphertext, new Date("2026-01-02T03:04:05.000Z"), new Date("2026-02-03T04:05:06.000Z")],
+    )
+  }
+}
+
+async function runReencryptionBatches(options: {
+  batchSize?: number
+  beforeWrite?: (record: RotationRecord, readerPid: number) => Promise<void>
+  afterBatch?: (batch: number) => Promise<void> | void
+} = {}): Promise<{ updated: number; skipped: number }> {
+  const batchSize = options.batchSize ?? 2
+  const reader = await pool.connect()
+  let updated = 0
+  let skipped = 0
+  let cursor = ""
+  let batch = 0
+  try {
+    const readerPid = Number((await reader.query("SELECT pg_backend_pid() AS pid")).rows[0]?.pid)
+    while (true) {
+      const { rows } = await reader.query<RotationRecord>(
+        `SELECT id, owner_id, category, title, content, sensitive, created_at, updated_at
+         FROM ${rotationTable} WHERE owner_id = $1 AND sensitive = TRUE AND id > $2
+         ORDER BY id LIMIT $3`,
+        [rotationOwner, cursor, batchSize],
+      )
+      if (rows.length === 0) break
+      for (const record of rows) {
+        const alreadyCurrent = decryptWithKey(record.content, newTestKey)
+        if (alreadyCurrent !== decryptionFailure) {
+          skipped += 1
+          cursor = record.id
+          continue
+        }
+
+        const plaintext = decryptWithKey(record.content, oldTestKey)
+        if (plaintext === decryptionFailure) throw new Error("Unreadable encrypted record; batch stopped.")
+        const ciphertext = withEncryptionKeys(newTestKey, undefined, () => encryptText(plaintext))
+        await options.beforeWrite?.(record, readerPid)
+        const result = await reader.query(
+          `UPDATE ${rotationTable} SET content = $1
+           WHERE id = $2 AND owner_id = $3 AND sensitive = TRUE AND content = $4`,
+          [ciphertext, record.id, rotationOwner, record.content],
+        )
+        if (result.rowCount !== 1) throw new Error(`Concurrent update conflict: expected 1 row, affected ${result.rowCount ?? "unknown"}.`)
+        updated += 1
+        cursor = record.id
+      }
+      batch += 1
+      await options.afterBatch?.(batch)
+    }
+    return { updated, skipped }
+  } finally {
+    reader.release()
+  }
+}
+
+async function readRotationRecord(id: string): Promise<RotationRecord> {
+  const result = await pool.query<RotationRecord>(`SELECT * FROM ${rotationTable} WHERE id = $1`, [id])
+  assert.equal(result.rowCount, 1)
+  return result.rows[0]!
+}
 
 function statement(strings: TemplateStringsArray, values: readonly unknown[]): { text: string; values: unknown[] } {
   let text = strings[0] ?? ""
@@ -96,8 +209,138 @@ process.env.JARVIS_OWNER_ID = owner
 process.env.JARVIS_ENCRYPTION_KEY = "postgres-integration-test-encryption-key"
 
 after(async () => {
+  if (rotationTableCreated) await pool.query(`DROP TABLE IF EXISTS ${rotationTable}`)
   clearDatabaseAdapterForTesting()
   await pool.end()
+})
+
+test("PostgreSQL connection is the new empty isolated v16 test database before writes", async () => {
+  const result = await pool.query<{
+    database_name: string
+    server_version: string
+    public_table_count: number
+  }>(`SELECT current_database() AS database_name, current_setting('server_version_num') AS server_version,
+      (SELECT count(*)::int FROM pg_tables WHERE schemaname = 'public') AS public_table_count`)
+  const identity = result.rows[0]
+  assert.ok(identity)
+  assert.equal(identity.database_name, "jarvis_test", "Refusing DB writes outside jarvis_test.")
+  assert.equal(Math.floor(Number(identity.server_version) / 10_000), 16, "Refusing DB writes outside PostgreSQL 16.")
+  assert.equal(identity.public_table_count, 0, "Refusing DB writes unless the isolated test database is fresh.")
+})
+
+test("PostgreSQL re-encryption preserves metadata and is readable with only the new key", async () => {
+  const plaintext = "synthetic historical memory"
+  await prepareRotationRecords([{ id: "valid-legacy", plaintext, key: oldTestKey }])
+  const result = await runReencryptionBatches()
+  const record = await readRotationRecord("valid-legacy")
+
+  assert.deepEqual(result, { updated: 1, skipped: 0 })
+  assert.ok(decryptWithKey(record.content, newTestKey) === plaintext, "New key could not read the re-encrypted record.")
+  assert.ok(decryptWithKey(record.content, oldTestKey) === decryptionFailure, "Record remained readable with only the old key.")
+  assert.deepEqual(
+    {
+      id: record.id,
+      owner_id: record.owner_id,
+      category: record.category,
+      title: record.title,
+      sensitive: record.sensitive,
+      created_at: record.created_at.toISOString(),
+      updated_at: record.updated_at.toISOString(),
+    },
+    {
+      id: "valid-legacy",
+      owner_id: rotationOwner,
+      category: "history",
+      title: "Synthetic 0",
+      sensitive: true,
+      created_at: "2026-01-02T03:04:05.000Z",
+      updated_at: "2026-02-03T04:05:06.000Z",
+    },
+  )
+})
+
+test("PostgreSQL re-encryption skips current ciphertext byte-for-byte on repeated runs", async () => {
+  await prepareRotationRecords([{ id: "already-current", plaintext: "synthetic current memory", key: newTestKey }])
+  const before = await readRotationRecord("already-current")
+
+  assert.deepEqual(await runReencryptionBatches(), { updated: 0, skipped: 1 })
+  assert.deepEqual(await runReencryptionBatches(), { updated: 0, skipped: 1 })
+  const after = await readRotationRecord("already-current")
+  assert.ok(after.content === before.content, "Already-current ciphertext changed during retry.")
+})
+
+test("PostgreSQL re-encryption resumes after an interruption between batches", async () => {
+  const records = [
+    { id: "resume-a", plaintext: "synthetic first memory", key: oldTestKey },
+    { id: "resume-b", plaintext: "synthetic second memory", key: oldTestKey },
+    { id: "resume-c", plaintext: "synthetic third memory", key: oldTestKey },
+  ]
+  await prepareRotationRecords(records)
+
+  await assert.rejects(
+    runReencryptionBatches({
+      batchSize: 2,
+      afterBatch: (batch) => {
+        if (batch === 1) throw new Error("Simulated interruption between batches.")
+      },
+    }),
+    /Simulated interruption between batches/,
+  )
+  assert.ok(decryptWithKey((await readRotationRecord("resume-a")).content, newTestKey) === records[0]?.plaintext)
+  assert.ok(decryptWithKey((await readRotationRecord("resume-b")).content, newTestKey) === records[1]?.plaintext)
+  assert.ok(decryptWithKey((await readRotationRecord("resume-c")).content, newTestKey) === decryptionFailure)
+
+  assert.deepEqual(await runReencryptionBatches({ batchSize: 2 }), { updated: 1, skipped: 2 })
+  for (const record of records) {
+    assert.ok(decryptWithKey((await readRotationRecord(record.id)).content, newTestKey) === record.plaintext)
+  }
+})
+
+test("PostgreSQL re-encryption detects concurrent changes and preserves the newer ciphertext", async () => {
+  const originalPlaintext = "synthetic original memory"
+  const newerPlaintext = "synthetic concurrently updated memory"
+  await prepareRotationRecords([{ id: "concurrent-update", plaintext: originalPlaintext, key: oldTestKey }])
+  const concurrentWriter = await pool.connect()
+  try {
+    await assert.rejects(
+      runReencryptionBatches({
+        beforeWrite: async (record, readerPid) => {
+          const writerPid = Number((await concurrentWriter.query("SELECT pg_backend_pid() AS pid")).rows[0]?.pid)
+          assert.notEqual(writerPid, readerPid, "Concurrent update must use a separate database connection.")
+          const newerCiphertext = withEncryptionKeys(newTestKey, undefined, () => encryptText(newerPlaintext))
+          const result = await concurrentWriter.query(
+            `UPDATE ${rotationTable} SET content = $1 WHERE id = $2 AND owner_id = $3`,
+            [newerCiphertext, record.id, rotationOwner],
+          )
+          assert.equal(result.rowCount, 1)
+        },
+      }),
+      /Concurrent update conflict: expected 1 row, affected 0/,
+    )
+  } finally {
+    concurrentWriter.release()
+  }
+  const record = await readRotationRecord("concurrent-update")
+  assert.ok(decryptWithKey(record.content, newTestKey) === newerPlaintext, "Concurrent writer's newer content was not preserved.")
+})
+
+test("PostgreSQL re-encryption stops on unreadable ciphertext without changing it", async () => {
+  const nextCiphertext = withEncryptionKeys(oldTestKey, undefined, () => encryptText("synthetic untouched memory"))
+  await prepareRotationRecords([])
+  await pool.query(
+    `INSERT INTO ${rotationTable} (id, owner_id, category, title, content, sensitive, created_at, updated_at)
+     VALUES ($1, $2, 'history', 'Synthetic corrupt', $3, TRUE, now(), now()),
+            ($4, $2, 'history', 'Synthetic next', $5, TRUE, now(), now())`,
+    ["unreadable-first", rotationOwner, "enc:v1:invalid:synthetic", "unreadable-next", nextCiphertext],
+  )
+  const unreadableBefore = await readRotationRecord("unreadable-first")
+  const nextBefore = await readRotationRecord("unreadable-next")
+
+  await assert.rejects(runReencryptionBatches(), /Unreadable encrypted record/)
+  const unreadableAfter = await readRotationRecord("unreadable-first")
+  const nextAfter = await readRotationRecord("unreadable-next")
+  assert.ok(unreadableAfter.content === unreadableBefore.content, "Unreadable ciphertext was changed.")
+  assert.ok(nextAfter.content === nextBefore.content, "Batch continued after an unreadable record.")
 })
 
 test("PostgreSQL migrates legacy memory, retains a recovery snapshot, and isolates member rows", async () => {
