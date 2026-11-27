@@ -14,7 +14,7 @@ import {
 } from "../lib/server/auth"
 
 const originalFetch = globalThis.fetch
-const envKeys = ["DEEPSEEK_API_KEY", "JARVIS_OWNER_ID", "JARVIS_SESSION_SECRET", "JARVIS_ENCRYPTION_KEY", "JARVIS_ACCESS_CODE"]
+const envKeys = ["DEEPSEEK_API_KEY", "JARVIS_OWNER_ID", "JARVIS_SESSION_SECRET", "JARVIS_ENCRYPTION_KEY", "JARVIS_LEGACY_ENCRYPTION_KEY", "JARVIS_ACCESS_CODE"]
 const originalEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]))
 
 afterEach(() => {
@@ -289,4 +289,22 @@ test("owner identity and data encryption are independent of session and provider
   assert.equal(ownerId(), stableId)
   assert.equal(isValidSessionToken(session.token), false)
   assert.equal(decryptText(encrypted), "recoverable sensitive data")
+})
+
+test("legacy ciphertext can be re-encrypted with the current key", () => {
+  const plaintext = "historical encrypted memory"
+  process.env.JARVIS_ENCRYPTION_KEY = "historical-test-encryption-key-1234567890"
+  delete process.env.JARVIS_LEGACY_ENCRYPTION_KEY
+  const historicalCiphertext = encryptText(plaintext)
+
+  process.env.JARVIS_ENCRYPTION_KEY = "rotated-test-encryption-key-1234567890"
+  process.env.JARVIS_LEGACY_ENCRYPTION_KEY = "historical-test-encryption-key-1234567890"
+  const recovered = decryptText(historicalCiphertext)
+  assert.equal(recovered, plaintext)
+
+  const rotatedCiphertext = encryptText(recovered)
+  assert.notEqual(rotatedCiphertext, historicalCiphertext)
+  delete process.env.JARVIS_LEGACY_ENCRYPTION_KEY
+  assert.equal(decryptText(rotatedCiphertext), plaintext)
+  assert.notEqual(decryptText(historicalCiphertext), plaintext)
 })
