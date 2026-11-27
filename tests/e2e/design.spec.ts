@@ -344,27 +344,27 @@ test("account change hides previous cloud and device memories and clears the run
   await expect(page.getByText("Device account A")).toHaveCount(0)
 })
 
-test("session expiry clears a previous chat prompt and demo result", async ({ page }) => {
-  let scope: string | null = "account-a"
-  await page.route("**/api/status", async (route) => route.fulfill({ json: {
-    deepseekConfigured: false, liveEnabled: false, authConfigured: true, authenticated: Boolean(scope),
-    accountScope: scope ?? undefined, databaseConfigured: false,
-    limits: { maxRequestUsd: 0, maxRequestTokens: 0, dailyBudgetUsd: 0, runsPer10Min: 0 }, usageToday: null,
-  } }))
-  await page.goto("/")
-  await page.getByLabel("Zadání pro JARVISe").fill("Private previous account prompt")
-  await page.getByRole("button", { name: "Odeslat zadání" }).click()
-  await expect(page.getByText("Výsledek · DEMO")).toBeVisible()
-  scope = null
-  await page.evaluate(() => {
-    const channel = new BroadcastChannel("vobio-jarvis-auth")
-    channel.postMessage("session-changed")
-    channel.close()
+test("session expiry polling hides cached analytics without focus changes", async ({ page }) => {
+  let expired = false
+  let statusRequests = 0
+  await page.clock.install({ time: new Date("2026-11-27T00:00:00Z") })
+  await page.route("**/api/status", async (route) => {
+    statusRequests += 1
+    await route.fulfill({ json: {
+      deepseekConfigured: false, liveEnabled: false, authConfigured: true, authenticated: !expired,
+      accountScope: expired ? undefined : "account-a", databaseConfigured: false,
+      limits: { maxRequestUsd: 0, maxRequestTokens: 0, dailyBudgetUsd: 0, runsPer10Min: 0 },
+      usageToday: expired ? null : { costUsd: 0.74, tokens: 4, requests: 1, shared: false },
+    } })
   })
-  await expect(page.getByText("Výsledek · DEMO")).toHaveCount(0)
-  await expect(page.getByText("Private previous account prompt")).toHaveCount(0)
-  await page.getByRole("button", { name: "Velín", exact: true }).click()
-  await expect(page.getByLabel("Zadání pro JARVISe")).toHaveValue("")
+  await page.goto("/")
+  await page.getByRole("button", { name: "Přehled", exact: true }).click()
+  await expect(page.getByText("$0.740")).toBeVisible()
+  expired = true
+  await page.clock.runFor(60_000)
+  await expect.poll(() => statusRequests).toBeGreaterThan(1)
+  await expect(page.getByText("$0.740")).toHaveCount(0)
+  await expect(page.getByText("Dnes na serveru").locator("..")).toContainText("—")
 })
 
 test("local analytics are isolated by account without deleting legacy usage", async ({ page }) => {

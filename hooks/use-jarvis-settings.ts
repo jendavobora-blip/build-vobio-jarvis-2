@@ -60,7 +60,12 @@ const fetchJson = async (url: string) => {
 }
 
 export function useServerStatus() {
-  return useSWR<StatusResponse>("/api/status", fetchJson, { revalidateOnFocus: true })
+  return useSWR<StatusResponse>("/api/status", fetchJson, {
+    revalidateOnFocus: true,
+    refreshInterval: 60_000,
+    refreshWhenHidden: false,
+    refreshWhenOffline: false,
+  })
 }
 
 /** Live execution requires a server key, configured auth, a valid session and the user toggle. */

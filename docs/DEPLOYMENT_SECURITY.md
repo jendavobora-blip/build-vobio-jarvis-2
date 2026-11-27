@@ -23,7 +23,7 @@ Databázové nasazení musí mít samostatně nastavené:
 
 Chybějící nebo neplatný `JARVIS_OWNER_ID` blokuje přihlášení a databázové operace místo odvození nového vlastníka. Rotace session tajemství odhlásí relace, ale nezmění vlastníka. Rotace šifrovacího klíče vyžaduje samostatnou re-encryption migraci; bez ní se starší záznamy nesmí mazat ani přepsat.
 
-Lokální paměť přihlášeného účtu je v prohlížeči oddělena podle serverem podepsaného account scope. Rotace session secretu změní i tento scope: staré lokální položky se nesmažou, ale nebudou automaticky přístupné. Před rotací zajistěte jejich bezpečný export a postup obnovy.
+Lokální paměť přihlášeného účtu je v prohlížeči oddělena podle serverem podepsaného account scope. Stav relace se při aktivní aplikaci obnovuje každých 60 sekund i při návratu do aplikace; při nejistém stavu se účetní data skryjí a při potvrzené změně scope se oddělí bez mazání starých záznamů. Rotace session secretu změní i tento scope: staré lokální položky se nesmažou, ale nebudou automaticky přístupné. Před rotací zajistěte jejich bezpečný export a postup obnovy.
 Starý společný klíč `vobio-jarvis.memory.v1` se již automaticky nezobrazuje ani nemaže: mohl obsahovat data více lidí. Případnou migraci musí provést vlastník zařízení až po ověření původu jednotlivých položek. Klient cloudové paměti zasílá `X-Jarvis-Account-Scope` získaný ze `/api/status`; server odmítne požadavek s neodpovídajícím scope.
 
 ## Migrace původní paměti
