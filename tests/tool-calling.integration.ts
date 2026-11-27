@@ -188,6 +188,31 @@ test("search_memory tool round succeeds and records invocation and outcome", asy
   assert.ok(result.promptTokens > 0)
 })
 
+test("search_memory returns only the account-scoped memories supplied to the run", async () => {
+  process.env.DEEPSEEK_API_KEY = "integration-test-placeholder"
+  const { runOrchestration } = await import("../lib/server/orchestrator")
+  const search = async (id: string, title: string, content: string) => {
+    const calls = installFetch({ firstCall: "tool", finalCall: "json" })
+    await runOrchestration({
+      body: makeBody([{ id, category: "projects", title, content }]),
+      emit: () => {},
+      signal: new AbortController().signal,
+      limits: { maxTokens: 500_000, maxCostUsd: 5 },
+      audit: ignoreAudit,
+    })
+    const toolRound = calls.find((call) => call.system.includes("search_memory") && call.hasToolMessage)
+    assert.ok(toolRound)
+    const messages = JSON.parse(toolRound.requestBody) as { messages: { role: string; content: string }[] }
+    return messages.messages.find((message) => message.role === "tool")?.content ?? ""
+  }
+  const ownerResult = await search("owner-orion", "Owner Projekt Orion", "Syntetická owner-only data o projektu Orion.")
+  const memberResult = await search("member-orion", "Member Projekt Orion", "Syntetická member-only data o projektu Orion.")
+  assert.ok(ownerResult.includes("Syntetická owner-only data"))
+  assert.equal(ownerResult.includes("member-only"), false)
+  assert.ok(memberResult.includes("Syntetická member-only data"))
+  assert.equal(memberResult.includes("owner-only"), false)
+})
+
 test("unknown tool name is rejected visibly and not reported as success", async () => {
   process.env.DEEPSEEK_API_KEY = "integration-test-placeholder"
   const rawToolName = `search_memory:${orionMemory[0]!.content}`
@@ -397,6 +422,62 @@ test("API error is emitted explicitly and never converted into an empty success"
   assert.equal(failureReason(audit), "model_error")
   assert.ok(!audit.some((event) => event.event === "run_completed"))
   assert.ok(!events.some((event) => event.type === "final"))
+})
+
+test("specialist failure closes the run with a terminal failure audit", async () => {
+  process.env.DEEPSEEK_API_KEY = "integration-test-placeholder"
+  const calls: string[] = []
+  globalThis.fetch = async (_input, init) => {
+    const request = JSON.parse(String(init?.body)) as { messages: { role: string; content: string }[] }
+    const system = request.messages.find((message) => message.role === "system")?.content ?? ""
+    calls.push(system)
+    if (system.includes("Role: RESEARCHER")) return new Response("provider unavailable", { status: 503 })
+    if (system.includes("Role: ROUTER")) {
+      return jsonResponse({
+        choices: [{
+          message: { content: JSON.stringify({ rationale: "Test", agents: [
+            { id: "researcher", task: "Vyhledej syntetický výzkum." },
+            { id: "planner", task: "Připrav syntetický plán." },
+          ] }) },
+          finish_reason: "stop",
+        }],
+        usage: usage(30, 10),
+      })
+    }
+    if (system.includes("Role: FINAL JUDGE")) {
+      return jsonResponse({
+        choices: [{ message: { content: JSON.stringify({ answer: "Nesmí být publikován úspěšný výsledek.", nextSteps: [], needsApproval: [] }) }, finish_reason: "stop" }],
+        usage: usage(30, 10),
+      })
+    }
+    return jsonResponse({
+      choices: [{ message: { content: JSON.stringify({ summary: "Dílčí plán.", points: ["bod"], data: [], confidence: "střední", warnings: [] }) }, finish_reason: "stop" }],
+      usage: usage(25, 8),
+    })
+  }
+
+  const { runOrchestration } = await import("../lib/server/orchestrator")
+  const events: RunEvent[] = []
+  const audit: OrchestrationAuditEvent[] = []
+  await runOrchestration({
+    body: { ...makeBody([]), enabledAgents: ["researcher", "planner"] },
+    emit: (event) => events.push(event),
+    signal: new AbortController().signal,
+    limits: { maxTokens: 500_000, maxCostUsd: 5 },
+    audit: async (event) => {
+      audit.push(event)
+    },
+  })
+
+  assert.equal(calls.filter((system) => system.includes("Role: RESEARCHER")).length, 1)
+  assert.ok(errorEvents(events).some((event) => event.agent === "researcher"))
+  assert.ok(statusEvents(events).some((status) => status.agent === "researcher" && status.status === "error"))
+  assert.ok(statusEvents(events).some((status) => status.agent === "planner" && status.status === "done"))
+  assert.equal(failureReason(audit), "model_error")
+  assert.equal(audit.at(-1)?.event, "run_failed")
+  assert.ok(!audit.some((event) => event.event === "run_completed"))
+  assert.ok(!events.some((event) => event.type === "final"))
+  assert.equal(events.at(-1)?.type, "done")
 })
 
 test("final model failure records run_failed and never emits a fallback as final", async () => {

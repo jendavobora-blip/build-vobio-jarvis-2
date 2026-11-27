@@ -92,6 +92,75 @@ test("Router delegates to legacy-compatible specialists and Final Judge returns 
   assert.equal(result.promptTokens, calls.length * 100)
 })
 
+test("orchestration phases pass prior specialist outputs to Final Judge", async () => {
+  process.env.DEEPSEEK_API_KEY = "integration-test-placeholder"
+  const calls: { role: string; user: string }[] = []
+  globalThis.fetch = async (_input, init) => {
+    const request = JSON.parse(String(init?.body)) as {
+      messages: { role: string; content: string }[]
+    }
+    const system = request.messages[0]?.content ?? ""
+    const user = request.messages.find((message) => message.role === "user")?.content ?? ""
+    const role = /Role: (ROUTER|RESEARCHER|STRÁŽCE PAMĚTI|ARCHITECT|ANALYST|CODER|CRITIC|FINAL JUDGE)/.exec(system)?.[1] ?? "unknown"
+    calls.push({ role, user })
+    const data = role === "ROUTER"
+      ? {
+          rationale: "Použij tým a respektuj fáze.",
+          agents: SPECIALISTS.map((id) => ({ id, task: `Úkol pro ${id}.` })),
+        }
+      : role === "FINAL JUDGE"
+        ? { answer: "Výsledky syntetizovány.", nextSteps: [], needsApproval: [] }
+        : {
+            summary: `výstup-${role}`,
+            points: [`bod-${role}`],
+            data: [],
+            confidence: "vysoká",
+            warnings: [],
+          }
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify(data) } }],
+      usage: { prompt_tokens: 100, completion_tokens: 80, prompt_cache_hit_tokens: 0 },
+    }), { headers: { "Content-Type": "application/json" } })
+  }
+
+  const { runOrchestration } = await import("../lib/server/orchestrator")
+  const events: RunEvent[] = []
+  const body: ChatRequestBody = {
+    message: "Ověř přenos výstupů mezi fázemi.",
+    mode: "universal",
+    depth: "full",
+    model: "deepseek-flash",
+    reasoning: false,
+    enabledAgents: [...SPECIALISTS],
+    budget: { maxTokens: 500_000, maxCostUsd: 5 },
+    memories: [],
+  }
+  await runOrchestration({
+    body,
+    emit: (event) => events.push(event),
+    signal: new AbortController().signal,
+    limits: { maxTokens: 500_000, maxCostUsd: 5 },
+    audit: async () => {},
+  })
+
+  const plan = events.find((event) => event.type === "plan")
+  assert.deepEqual(plan?.selected.map(({ agent }) => agent), SPECIALISTS)
+  const callIndex = (role: string) => calls.findIndex((call) => call.role === role)
+  const firstPhase = ["RESEARCHER", "STRÁŽCE PAMĚTI", "ARCHITECT", "ANALYST"]
+  const firstPhaseIndexes = firstPhase.map(callIndex)
+  const creatorIndex = callIndex("CODER")
+  const criticIndex = callIndex("CRITIC")
+  const judgeIndex = callIndex("FINAL JUDGE")
+  assert.ok(calls[0]?.role === "ROUTER")
+  assert.ok(firstPhaseIndexes.every((index) => index > 0 && index < creatorIndex))
+  assert.ok(creatorIndex < criticIndex && criticIndex < judgeIndex)
+  for (const role of firstPhase) assert.ok(calls[creatorIndex]?.user.includes(`výstup-${role}`))
+  assert.ok(calls[criticIndex]?.user.includes("výstup-CODER"))
+  for (const role of [...firstPhase, "CODER", "CRITIC"]) {
+    assert.ok(calls[judgeIndex]?.user.includes(`výstup-${role}`))
+  }
+})
+
 test("invited account passwords are salted and verified without storing plaintext", async () => {
   const password = "test-only-password-4-accounts"
   const encoded = await hashAccountPassword(password)
