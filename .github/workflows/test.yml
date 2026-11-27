@@ -26,6 +26,7 @@ jobs:
           POSTGRES_USER: postgres
         ports:
           - 5432:5432
+          - 4444:4444
         options: >-
           --health-cmd "pg_isready -U postgres -d jarvis_test"
           --health-interval 10s
@@ -52,3 +53,18 @@ jobs:
       - run: pnpm audit --prod
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:e2e
+      - name: Start isolated Neon HTTP proxy
+        run: |
+          docker run -d --rm --name jarvis-test-neon \
+            --network container:${{ job.services.postgres.id }} \
+            -e PG_CONNECTION_STRING=postgres://postgres:postgres@127.0.0.1:5432/jarvis_test \
+            ghcr.io/timowilhelm/local-neon-http-proxy@sha256:cd2ae14edf2feafbc3330492de5c80506f77274c3bd013154cdef697bdeb768a
+          for attempt in $(seq 1 30); do
+            if curl -sS -o /dev/null http://127.0.0.1:4444/sql; then exit 0; fi
+            sleep 1
+          done
+          echo "Neon test proxy is not ready" >&2
+          exit 1
+      - run: pnpm test:e2e:db
+        env:
+          JARVIS_TEST_NEON_PROXY_URL: http://127.0.0.1:4444/sql
